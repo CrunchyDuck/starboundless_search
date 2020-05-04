@@ -24,20 +24,41 @@ def index_mods():
 			return directory_of_recipes
 
 		def get_objects():
+			# File extensions that contain data we'll need:
+			# .liquid, .liqitem, .object .matitem
 			return directory_of_objects
 
 
 		def update_objects():
+			def update_learnDB(): # This database will contain any recipe that is learned from picking up an object, and what you learn from it.
+				return nothing
+
 			return nothing
 
 		def update_recipes():
+			def update_inputDB(): # The input db needs to be separate from the update db because it is often an array
+				return nothing
+
+			def update_outputDB(): # It's possible I'll need to do the same as the input DB, as it is *possible* albeit uncommon for a mod to have multiple outputs.
+				return nothing
+
 			return nothing
 
-	pass
 
 
 def search_object_id_for_real_name(object_id): # SEarch the database for the correct "name" of an object. E.G Concrete Block has the itemID of concretematerial. We need to convert concretematerial to Concrete Block.
 	return object_name
+
+
+def standard_search(text, search_type, search_part=False):
+
+	if search_part: # This should be an option the user can toggle on. When this is one, the search engine will return all values that contain this piece or more. It will never return a single item.
+		pass
+	else: # If search path is off, then we'll check the SQL database for a perfect match. If this isn't found, then we'll treat it as if it was "search part"
+		if search_type == "object": # The search type will determine if they're searching for recipes or for objects.
+			pass
+		elif search_type == "recipe": # If recipe, it'll return all of the recipes this object is used in the making of.
+			pass
 
 
 # This should be made to handle any errors.

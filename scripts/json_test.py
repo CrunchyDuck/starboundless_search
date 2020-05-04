@@ -3,29 +3,24 @@ import sqlite3
 from pathlib import Path
 import os
 import datetime
+import re
 
 
-def err (file, string, should_print):
+def err(file, string, should_print):
 	"""Add the error message into the file, and optionally print the error to the console."""
-	file += "\n" + string
-	if should_print:
-		print(string)
+	# This is going to be replaced with a better system in final release.
+	pass
 
 
 def create_table(cursor):
 	"""Create an SQL table"""
+	# The output of a recipe might be able to make multiple of
 	cursor.execute("""CREATE TABLE recipes (
 		name string,
 		station string,
 		duration real,
 		input string,
 		output string
-		)""")
-
-	cursor.execute("""CREATE TABLE inputs (
-		recipe string,
-		item string,
-		count integer
 		)""")
 
 
@@ -51,26 +46,42 @@ steamapps_path = Path("E:/Steam/steamapps")
 master_path = Path(str(steamapps_path))
 starbound_path = Path(str(master_path) + "/common/Starbound")
 unpacked_folder = Path(str(starbound_path) + "/test_unpack")
-
 recipe_folder = Path(str(unpacked_folder) + "/recipes")
 
+this_folder = Path.cwd().parent
+data_folder = Path(str(this_folder) + "/data")
+scripts_folder = Path(str(this_folder) + "/scripts")
+images_folder = Path(str(this_folder) + "/images")
+
 recipes = list(recipe_folder.glob("**/*.recipe"))  # Fetch all .recipe files within this directory and all subdirectories.
-error_file = ""
+
+log_file = ""
+
 
 mode = "read"
 
 in_time = datetime.datetime.now() # This will be used to calculate how long the operation took.
 
 if mode == "read":
-	conn = sqlite3.connect("recipe_test.foxdb")  # Open the SQL database on the PC. (Need to look into specifying a path for this to create to.)
+	conn = sqlite3.connect(str(data_folder) + "/recipe_test.foxdb")  # Open the SQL database on the PC. (Need to look into specifying a path for this to create to.)
 	cur = conn.cursor()  # I have no clue, but it seems to relate to the information stored within the database we've opened.
+	results = cur.execute("SELECT * FROM recipes")
+	for result in cur.fetchall():
+		print(result)
 
-	for row in cur.execute("SELECT * FROM recipes ORDER BY name"):
-		pass #print(row)
+
+if mode == "search":
+	with open(str(data_folder) + "/recipe_names.fox") as f:
+		txt = f.read()
+
+	x = re.findall(".*rob.*", txt, re.IGNORECASE)
+	for i in x:
+		print(i)
+
 
 if mode == "create":
-	os.remove(os.getcwd() + "/recipe_test.foxdb") # Remove an existing database.
-	conn = sqlite3.connect("recipe_test.foxdb") # Open the SQL database on the PC. (Need to look into specifying a path for this to create to.)
+	os.remove(str(data_folder) + "/recipe_test.foxdb") # Remove an existing database.
+	conn = sqlite3.connect(str(data_folder) + "/recipe_test.foxdb") # Open the SQL database on the PC. (Need to look into specifying a path for this to create to.)
 	cur = conn.cursor() # I have no clue, but it seems to relate to the information stored within the database we've opened.
 
 
@@ -79,11 +90,12 @@ if mode == "create":
 	for recipe in recipes:
 		recipe_name = get_name(recipe)
 
+		# Attempt to read the JSON file.
 		with open(recipe) as file:
 			try:
 				data = json.load(file)
 			except json.decoder.JSONDecodeError as e:
-				err(error_file, "Erroneous JSON code in {}, attempting to fix...".format(recipe_name), True)
+				err(log_file, "Erroneous JSON code in {}, attempting to fix...".format(recipe_name), True)
 
 
 				file.seek(0) # We've already read the file once, so reset the seek.
@@ -100,47 +112,65 @@ if mode == "create":
 				# Try to read the string again after all comments have been removed.
 				try:
 					data = json.loads(new_file) # Changed to loads with an s as we're reading a string, not a file.
-					err(error_file, "Successful!", True)
+					err(log_file, "Successful!", True)
 				except Exception as e:
-					err(error_file, "Cannot load file, error {}. Skipping file...".format(e), True)
+					err(log_file, "Cannot load file, error {}. Skipping file...".format(e), True)
 					continue
 
 		# Index materials for crafting
 		try:
 			craft_materials = data["input"]
-			for item in craft_materials:
-				cur.execute("INSERT INTO inputs VALUES (?, ?, ?)", (recipe_name, item["item"], item["count"]))
-				conn.commit()
+
+			try:
+				inputs = ""
+				for item in craft_materials:
+					inputs += "{}/{}/".format(item["item"], item["count"])
+				inputs = inputs[:-1] # Remove the last character, as it will always be a forward slash.
+
+			except TypeError: # In the event that some how it's formatted as a single value.
+				inputs = "{}/{}".format(craft_materials["item"], craft_materials["count"])
+
 		except KeyError:
-			err(error_file, "No input defined in {}".format(recipe_name), False)
-			cur.execute("INSERT INTO inputs VALUES (?, 'UNKNOWN', 'UNKNOWN')", (recipe_name))
-			conn.commit()
+			err(log_file, "No input defined in {}".format(recipe_name), False)
+			inputs = "UNKNOWN"
 
 		# Index what's created
 		try:
 			outputarr = data["output"]
-			output = "{} ({})".format(outputarr["item"], outputarr["count"])
+
+			try:
+				outputs = "{}/{}".format(outputarr["item"], outputarr["count"])
+
+			except TypeError: # For handling multiple outputs
+				outputs = ""
+
+				for item in outputarr:
+					outputs = "{}/{}/".format(item["item"], item["count"])
+				outputs = outputs[:-1]
+
 		except KeyError:
-			err(error_file, "No output defined in {}".format(recipe_name), False)
-			output = "UNDEFINED"
+			err(log_file, "No output defined in {}".format(recipe_name), False)
+			outputs = "UNDEFINED"
 
 		# Index what group it's stored in
 		try:
 			groupsarr = data["groups"]
 			station_name = groupsarr[0]
+
 		except KeyError:
-			err(error_file, "No station name in {}".format(recipe_name), False)
+			err(log_file, "No station name in {}".format(recipe_name), False)
 			station_name = "UNDEFINED"
 
 		# Index crafting duration
 		try:
 			duration = data["duration"]
+
 		except KeyError:
-			err(error_file, "No duration key in {}".format(recipe_name), False)
+			err(log_file, "No duration key in {}".format(recipe_name), False)
 			duration = -1 # Duration isn't listed so we'll have to mark it as unknown.
 
 		# Create entry in SQL table
-		cur.execute("INSERT INTO recipes VALUES (?, ?, ?, ?, ?)", (recipe_name, station_name, duration, recipe_name, output))
+		cur.execute("INSERT INTO recipes VALUES (?, ?, ?, ?, ?)", (recipe_name, station_name, duration, inputs, outputs))
 		conn.commit()
 
 out_time = datetime.datetime.now()
