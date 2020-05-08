@@ -12,6 +12,7 @@ try:
 	import logging
 	import sqlite3
 	import json
+	from datetime import datetime
 except ModuleNotFoundError as e:
 	print("{}\nThis likely means that there's a file missing. If so, please contact me (CrunchyDuck) and show me this error message.".format(e))
 	input()
@@ -56,6 +57,8 @@ class database():
 		# self.db_tables = ["recipes", "objects", "learn", "id_convert"]
 		if b_make_db:
 			self.create_tables(self.cursor)
+
+		self.re_block_comment = re.compile(r'(/\*)(.|\n)*(\*/)') # This is used to search a JSON file for block comments.
 
 		# Declares many more variables that may need to be reset at times.
 		self.reset()
@@ -215,69 +218,199 @@ class database():
 
 		self.cursor.execute("INSERT INTO modlist VALUES (?, ?, ?, ?, ?)", (checksum, values[0], values[1], values[2], values[3]))
 
+		# List of all file extensions we need to parse. for now I'm just using this to find where all recipes are learned from.
+		extensions = ["liqitem", "object", "matitem", "chest", "legs", "head", "activeitem", "augment", "back", "beamaxe", "consumable", "currency", "flashlight", "harvestingtool", "inspectiontool", "instrument", "item", "miningtool", "objectdisabled", "painttool", "thrownitem", "tillingtool", "wiretool", "projectile"]
+		all_files = []
 
-		# Index active items
-		# TODO: Many weapons have "builderConfig"s. These are essentially ways that the item can be created, E.G a staff may have fire, ice, electric etc. I need to include this some how if possible. Maybe check the wiki for inspiration.
-		# I'll need to learn to read lua to do this, it seems, so that makes me sad.
-		files = list(dir.glob("**/*.activeitem"))
-		fields = ["itemName", "power", "knockback", "level"]
-		# TODO: I really need to change how I treat an object based on its "category", rather than just hoping for the best.
-		for file in files:
+		for e in extensions:
+			all_files += list(dir.glob("**/*.{}".format(e)))
+
+		# Create learned list. This will normally be created *at the same time* as the object list.
+		learned_list = []
+		for file in all_files:
 			read_data = self.read_json(str(file))
-			values = []
-			generic = self.generic_object_data(file, from_mod, table = "weapon")
+			itemname = "?"
+			learned = ""
 
-			# If the item is one handed, parse it generically.
-			if not generic[3]:
-				for field in fields:
+			try:
+				learnedList = read_data["learnBlueprintsOnPickup"]
+				for i in learnedList:
+					learned += "{}/".format(i)
+				learned = learned[:-1]
+			except KeyError:
+				continue
+
+			try:
+				itemname = read_data["itemName"]
+			except KeyError:
+				try:
+					itemname = read_data["objectName"]
+				except KeyError:
+					logging.warning("Could not find itemName in {}".format(Path(file).name))
+
+			if learned:
+				learned_list.append((itemname, learned, from_mod))
+
+		insert_alone_time = 0
+		start_time = datetime.now()
+		for i in learned_list:
+			in_time = datetime.now()
+			self.cursor.execute("INSERT INTO learn VALUES (?, ?, ?)", i)
+			out_time = datetime.now()
+
+			difference = out_time - in_time
+			if insert_alone_time != 0:
+				insert_alone_time = (insert_alone_time + difference) / 2
+			else:
+				insert_alone_time = difference
+		end_time = datetime.now()
+		elapsed_time = end_time - start_time
+
+		print("Inserted at an average speed of {} per object across {}".format(insert_alone_time, elapsed_time))
+
+		# Create recipe list
+		recipes = list(dir.glob("**/*.recipe"))
+		collected_recipes = [] # I'm going to collect all of the recipes and commit them to the database in an executemany to (hopefully) speed the process up.
+		recipes_average_time = 0
+		for file in recipes:
+			in_time = datetime.now()
+			read_data = self.read_json(str(file))
+			input = ""
+			output = ""
+			station = ""
+			duration = 0
+			name = "" # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
+
+			# Get inputs.
+			try:
+				input_field = read_data["input"]
+
+				try:  # Input stores an array of dictionaries
+					for i in input_field:
+						input += "{}/{}/".format(i["item"], i["count"])
+					input = input[:-1]
+				except KeyError:  # Input stores a dictionary
+					input = "{}/{}".format(input_field["item"], input_field["count"])
+			except KeyError:
+				logging.warning("Could not read input from file {}".format(Path(file).name))
+				input = "?"
+
+			# Get outputs.
+			try:
+				output_field = read_data["output"]
+
+				try:  # Output stores a dictionary
+					name = output_field["item"]
+					output = "{}/{}".format(name, output_field["count"])
+				except KeyError:  # Output stores an array of dictionaries
+					for i in output_field:
+						name += i["item "] # I'm not sure how this will look but hopefully this never happens please modders
+						output += "{}/{}/".format(name, i["count"])
+					output = output[:-1]
+					name = name[:-1]
+					logging.warning("File {} is using an array for its output instead of a single dictionary. You monster.".format(file))
+			except KeyError:
+				output = "?"
+				logging.warning("Could not read output from file {}".format(Path(file).name))
+
+			# Get station.
+			try:
+				groups = read_data["groups"]
+				station = groups[0] # The first entry should always be the entry of the table.
+			except KeyError:
+				station = "?"
+				logging.warning("Could not read input from file {}".format(Path(file).name))
+
+			# Get duration
+			try:
+				duration = read_data["duration"]
+			except KeyError:
+				duration = 0.1 # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
+				logging.debug("Duration not specified in file {}".format(Path(file).name))
+
+			collected_recipes.append((name, station, duration, input, output, from_mod))
+			out_time = datetime.now()
+			time = out_time - in_time
+			if recipes_average_time != 0:
+				recipes_average_time = (recipes_average_time + time) / 2
+			else:
+				recipes_average_time = time
+
+		#print("Average recipes time: {}".format(recipes_average_time))
+
+		in_time = datetime.now()
+		self.cursor.executemany("INSERT INTO recipes VALUES(?, ?, ?, ?, ?, ?)", collected_recipes)
+		out_time = datetime.now()
+
+		recipe_num = len(collected_recipes)
+		diff = out_time - in_time
+		print("It took {} to insert all recipes for an average of {} per recipe.".format(diff, diff / recipe_num ))
+
+
+
+		if False: # Temporarily taken out so I can test with the recipe database only.
+			# Index active items
+			# TODO: Many weapons have "builderConfig"s. These are essentially ways that the item can be created, E.G a staff may have fire, ice, electric etc. I need to include this some how if possible. Maybe check the wiki for inspiration.
+			# I'll need to learn to read lua to do this, it seems, so that makes me sad.
+			files = list(dir.glob("**/*.activeitem"))
+			fields = ["itemName", "power", "knockback", "level"]
+			# TODO: I really need to change how I treat an object based on its "category", rather than just hoping for the best.
+			for file in files:
+				read_data = self.read_json(str(file))
+				values = []
+				generic = self.generic_object_data(file, from_mod, table = "weapon")
+
+				# If the item is one handed, parse it generically.
+				if not generic[3]:
+					for field in fields:
+						try:
+							values.append(read_data[field])
+						except KeyError:
+							values.append("?")
+							logging.info("Could not find {} while searching {}".format(field, Path(file).name))
+						values.append("None") # There will be no alt ability as it is a single handed item
+
+				# If the object is two handed we'll need to parse it differently
+				else:
+					# Get name
 					try:
-						values.append(read_data[field])
+						values.append(read_data["itemName"])
 					except KeyError:
 						values.append("?")
-						logging.info("Could not find {} while searching {}".format(field, Path(file).name))
-					values.append("None") # There will be no alt ability as it is a single handed item
+						logging.info("Could not find itemName while searching {}".format(Path(file).name))
 
-			# If the object is two handed we'll need to parse it differently
-			else:
-				# Get name
-				try:
-					values.append(read_data["itemName"])
-				except KeyError:
+					# Attempt to search for primary and secondary ability
+					try:
+						primary = read_data["primaryAbility"]
+						new_fields = ["power", "knockback"] # These are the fields we want to find either in the .projectile, or in projectileParameters
+						projectile = primary["projectileType"] # The type of projectile shot will determine default values.
+						powerProjectile = None # These is also a "power projectile" type on bows, which is likely the projectile used when perfectly timed.
+						projectile_parameters = primary["projectileParameters"]
+						projectile_default = None # TODO We need to create a table for .projectiles, and then read the value of the projectile to here to reference if an attempt fails.
+
+						# Attempt to fetch projectile parameters. Should If it fails, should search the projectileType's values instead.
+						for new_field in new_fields:
+							try:
+								values.append(projectile_parameters[new_field])
+							except KeyError: # Find the value in the .projectile instead.
+								values.append("?")
+								pass
+					# Likely means it uses a builder instead.
+					except KeyError:
+						values.append("?")
+						values.append("?")
+
+					# Get level
+					try:
+						values.append(read_data["level"])
+					except KeyError:
+						values.append("?")
+						logging.info("Could not find level while searching {}".format(Path(file).name))
+
+					# Get alt ability
 					values.append("?")
-					logging.info("Could not find itemName while searching {}".format(Path(file).name))
 
-				# Attempt to search for primary and secondary ability
-				try:
-					primary = read_data["primaryAbility"]
-					new_fields = ["power", "knockback"] # These are the fields we want to find either in the .projectile, or in projectileParameters
-					projectile = primary["projectileType"] # The type of projectile shot will determine default values.
-					powerProjectile = None # These is also a "power projectile" type on bows, which is likely the projectile used when perfectly timed.
-					projectile_parameters = primary["projectileParameters"]
-					projectile_default = None # TODO We need to create a table for .projectiles, and then read the value of the projectile to here to reference if an attempt fails.
-
-					# Attempt to fetch projectile parameters. Should If it fails, should search the projectileType's values instead.
-					for new_field in new_fields:
-						try:
-							values.append(projectile_parameters[new_field])
-						except KeyError: # Find the value in the .projectile instead.
-							values.append("?")
-							pass
-				# Likely means it uses a builder instead.
-				except KeyError:
-					values.append("?")
-					values.append("?")
-
-				# Get level
-				try:
-					values.append(read_data["level"])
-				except KeyError:
-					values.append("?")
-					logging.info("Could not find level while searching {}".format(Path(file).name))
-
-				# Get alt ability
-				values.append("?")
-
-			self.cursor.execute("INSERT INTO weapon VALUES (?, ?, ?, ?, ?, ?)", (values[0], values[1], values[2], values[3], values[4], from_mod))
+				self.cursor.execute("INSERT INTO weapon VALUES (?, ?, ?, ?, ?, ?)", (values[0], values[1], values[2], values[3], values[4], from_mod))
 
 		self.connect("commit")
 		self.connect.commit()
@@ -331,6 +464,7 @@ class database():
 		:param from_mod: The name of the mod this entry belongs to.
 		:return: Returns array of parsed data
 		"""
+		# TODO: Make this to simply get the data, and not automatically submit it.
 		read_data = self.read_json(str(directory))
 		fields = ["itemName", "shortdescription", "price", "twoHanded", "category", "rarity", "description"]
 		values = []
@@ -341,6 +475,13 @@ class database():
 			except KeyError:
 				if field == "twoHanded":
 					values.append(0)
+					continue
+				elif field == "itemName":
+					try:
+						values.append(read_data["objectName"])
+						continue
+					except KeyError:
+						values.append("?")
 				else:
 					values.append("?")
 				logging.warning("Could not find {} for generic table while searching {}".format(field, Path(directory).name)) # TODO add in more detail about which file is being checked.
@@ -374,7 +515,7 @@ class database():
 				file.seek(0)  # We've already read the file once, so reset the seek.
 				new_file = file.read()  # Convert the file to a string so we can run functions on it.
 
-				# Search for comments.
+				# Search for inline comments.
 				while True:  # Will automatically break out if it find no comments.
 					comment_start = new_file.find("//") # TODO - I've seen // be used in actual values (e.g "name": "//duck". I should change this to regex so I can account for this in the future.
 					if comment_start == -1:
@@ -383,6 +524,18 @@ class database():
 						linebreak = new_file.find("\n", comment_start)
 						comment = new_file[comment_start:linebreak]
 						new_file = new_file.replace(comment, "")  # Okay I really should be using RegEx here, but it's been years since I touched it an I can't be bothered to learn it again right now.
+
+				# Search for block comments.
+				while True:
+					match = re.search(self.re_block_comment, new_file)
+					if match:
+						comment_start = match.start(0)
+						comment_end = match.end(0)
+						comment = new_file[comment_start:comment_end]
+						new_file = new_file.replace(comment, "")
+					else:
+						break
+				#print(new_file)
 
 				# Try to read the string again after all comments have been removed.
 				try:
@@ -393,16 +546,6 @@ class database():
 					logging.warning("Cannot load file, error {}. Skipping file...".format(e))
 					data = None
 					return data
-
-	def generate_checksum(self, file_path):
-		#logging.debug("Generating checksum for file located at {}...".format(file_path))
-		hash_md5 = md5()
-		with open(file_path, "rb") as f:
-			for chunk in iter(lambda: f.read(4096), b""):
-				hash_md5.update(chunk)
-		checksum = hash_md5.hexdigest()
-
-		return checksum
 
 	def reset(self):
 		"""Defines and or resets all of the self. variables I will be using."""
@@ -432,24 +575,6 @@ class database():
 			rarity TEXT,
 			description TEXT,
 			detailed_table TEXT,
-			from_mod TEXT
-			)""")
-
-		cursor.execute("""CREATE TABLE weapon (
-			item_name TEXT,
-			power INTEGER,
-			knockback INTEGER,
-			level INTEGER,
-			alt_ability TEXT,
-			from_mod TEXT
-			)""")
-		# NOTES ON THIS:
-		# "Power" can be stored in multiple ways depending on if the item is one handed or two handed.
-
-		# All information that might be too niche or too item specific to be on everything.
-		cursor.execute("""CREATE TABLE weapon_detailed (
-			item_name TEXT,
-			cooldown TEXT,
 			from_mod TEXT
 			)""")
 
@@ -488,10 +613,20 @@ class database():
 
 		cursor.execute("commit")
 
-
 	def regexp(self, expr, item):
 		reg = re.compile(expr)
 		return reg.search(item) is not None
+
+
+	def generate_checksum(self, file_path):
+		#logging.debug("Generating checksum for file located at {}...".format(file_path))
+		hash_md5 = md5()
+		with open(file_path, "rb") as f:
+			for chunk in iter(lambda: f.read(4096), b""):
+				hash_md5.update(chunk)
+		checksum = hash_md5.hexdigest()
+
+		return checksum
 
 
 if __name__ == "__main__":
