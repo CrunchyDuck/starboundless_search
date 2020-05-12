@@ -48,17 +48,17 @@ class database():
 			b_make_db = True
 
 		self.connect = sqlite3.connect(db_file)  # Open the SQL database on the PC.
-		self.connect.isolation_level = None
 		self.cursor = self.connect.cursor()  # I don't quite understand how the cursor works, but it's the main thing used when interacting with the database.
-		self.connect.create_function("REGEXP", 2, self.regexp)
+		self.connect.create_function("REGEXP", 2, regexp)
 
 		# If the file was detected, check if all tables are present.
 		# TODO - Add this. I couldn't find a way to get the number of tables easily, so I'll do it later.
 		# self.db_tables = ["recipes", "objects", "learn", "id_convert"]
 		if b_make_db:
-			self.create_tables(self.cursor)
+			self.create_tables()
 
 		self.re_block_comment = re.compile(r'(/\*)(.|\n)*(\*/)') # This is used to search a JSON file for block comments.
+		self.re_colour_tag = re.compile(r'\^.*?;')
 
 		# Declares many more variables that may need to be reset at times.
 		self.reset()
@@ -81,7 +81,7 @@ class database():
 			# TODO here. I'm going to change this over to an SQL database, so if the DB gets corrupted it'll automatically deal with the modlist.
 
 		for mod in all_mods:
-			mod_id = self.generate_checksum(mod)
+			mod_id = generate_checksum(mod)
 			if mod_id not in self.indexed_checksums:
 				logging.debug("New checksum {} found".format(mod_id))
 				self.mod_files.append(str(mod))
@@ -198,16 +198,19 @@ class database():
 		:param checksum: (str) The checksum of the file before it was unpacked, for indexing purposes.
 		"""
 		dir = Path(filepath)
-		self.connect.execute("begin")
+		# TODO: Figure out why "peacekeeper1" isn't being indexed.
 
-		# Create modlist
+		####################
+		## Create modlist ##
+		####################
 		# TODO: Apparently the metadata file is optional, so I need to find a way to deal with that in the event that a mod doesn't include it. Likely I'll just use the checksum as a backup.
 		meta = str(dir) + "/_metadata"
-		read_data = self.read_json(meta) # The contents of the file.
 		fields = ["name", "friendlyName", "author", "version"] # This will contain all fields that can be handled in a similar/same way. Other fields may be done manually.
 		values = [] # A generic field we'll store things in temporarily
+		from_mod = "" # This is the mod that this unpack belongs to.
 
 		# Search for all data we can pull.
+		read_data = self.read_json(meta)  # The contents of the file.
 		for field in fields:
 			try:
 				values.append(read_data[field])
@@ -218,108 +221,195 @@ class database():
 
 		self.cursor.execute("INSERT INTO modlist VALUES (?, ?, ?, ?, ?)", (checksum, values[0], values[1], values[2], values[3]))
 
-		# List of all file extensions we need to parse. for now I'm just using this to find where all recipes are learned from.
-		extensions = ["liqitem", "object", "matitem", "chest", "legs", "head", "activeitem", "augment", "back", "beamaxe", "consumable", "currency", "flashlight", "harvestingtool", "inspectiontool", "instrument", "item", "miningtool", "objectdisabled", "painttool", "thrownitem", "tillingtool", "wiretool", "projectile"]
+		# List of all file extensions we need to parse for useful data.
+		extensions = ["liqitem", "object", "matitem", "chest", "legs", "head", "activeitem", "augment", "back", "beamaxe", "consumable", "currency", "flashlight", "harvestingtool", "inspectiontool", "instrument", "item", "miningtool", "objectdisabled", "painttool", "thrownitem", "tillingtool", "wiretool"]
 		all_files = []
 
-		for e in extensions:
-			all_files += list(dir.glob("**/*.{}".format(e)))
+		for exten in extensions:
+			all_files += list(dir.glob("**/*.{}".format(exten)))
 
-		# Create learned list. This will normally be created *at the same time* as the object list.
-		learned_list = []
+
+		# Search through all decompiled files.
+		learned_list = [] # _list variables will store anything that needs to be loaded into a a table. We'll do them in bulk to make it much, much faster.
+		stations_groups = []
+		object_list = []
 		for file in all_files:
+			# Note: Starbound reads the extension of an object (such as .activeitem) to determine what it should search for. I should do the same to emulate what will be available in game.
+			self.filename = Path(file).name
 			read_data = self.read_json(str(file))
-			itemname = "?"
-			learned = ""
-
-			try:
-				learnedList = read_data["learnBlueprintsOnPickup"]
-				for i in learnedList:
-					learned += "{}/".format(i)
-				learned = learned[:-1]
-			except KeyError:
+			if read_data == "?":
+				logging.error("Could not read JSON file located at {}, skipping file.".format(str(file)))
 				continue
 
+			###################
+			## Create Object ##
+			###################
+			item_name = self.json_get("itemName", read_data, error_on_fail=False)
+			if item_name == "?": # This might happen if it is a .object file.
+				item_name = self.json_get("objectName", read_data, error_message="File {} has no itemName or objectName key. Cannot be indexed.".format(self.filename))
+			display_name = self.json_get("shortdescription", read_data, error_message="File {} has no shortdescription key.".format(self.filename))
+			category = self.json_get("category", read_data, error_message="File {} has no category key.".format(self.filename))
+			if item_name != "?" and category != "?" and display_name != "?":
+				object_list.append((item_name, display_name, category, 0, 0, "?", "?", from_mod))
+
+
+			##################
+			## Create Learn ##
+			##################
 			try:
-				itemname = read_data["itemName"]
-			except KeyError:
-				try:
-					itemname = read_data["objectName"]
-				except KeyError:
-					logging.warning("Could not find itemName in {}".format(Path(file).name))
+				learnedList = read_data["learnBlueprintsOnPickup"]
+				for learned in learnedList:
+					if learned: # I've seen some objects have no values within this field, so I need to check for that.
+						learned_list.append((item_name, learned, from_mod))
+			except KeyError: # This will trigger if there's nothing to be learned from this object.
+				pass
 
-			if learned:
-				learned_list.append((itemname, learned, from_mod))
 
-		insert_alone_time = 0
-		start_time = datetime.now()
-		for i in learned_list:
-			in_time = datetime.now()
-			self.cursor.execute("INSERT INTO learn VALUES (?, ?, ?)", i)
-			out_time = datetime.now()
+			#####################
+			## Crafting Groups ##
+			#####################
+			# NOTE: If a table doesn't have the "crafting" category tag, I will not be able to find it. This is to optimize the time it takes to scan objects, maybe I'll turn this off in the future if it's not too much of an increase.
+			cat = self.json_get("category", read_data, error_on_fail=False)
 
-			difference = out_time - in_time
-			if insert_alone_time != 0:
-				insert_alone_time = (insert_alone_time + difference) / 2
-			else:
-				insert_alone_time = difference
-		end_time = datetime.now()
-		elapsed_time = end_time - start_time
+			if cat == "crafting":
+				group = self.json_get("recipeGroup", read_data, error_on_fail=False) # This seems to be an old method they changed from at a later date, but of course they didn't remove it all.
+				if group != "?":
+					stations_groups.append((group, item_name, from_mod))
 
-		print("Inserted at an average speed of {} per object across {}".format(insert_alone_time, elapsed_time))
+				else:
+					upgrade_stages = self.json_get("upgradeStages", read_data, error_on_fail=False) # Check if this object has upgrade stages. If so, this will take priority. Hopefully that's how the game does it.
+					if upgrade_stages != "?":
+						object_list.pop() # I believe that first object in upgrade_stages will always be a duplicate of whatever you find in the rest of the file, so I remove it here.
+						for obj in upgrade_stages:
 
-		# Create recipe list
+							############################
+							## Create new object_list ##
+							############################
+							params = self.json_get("itemSpawnParameters", obj, error_on_fail=True) # TODO maybe replace this with an actual try/except so I can give more information.
+							if params != "?":
+								o_item_name = self.json_get("animationState", obj)
+								o_display_name = self.json_get("shortdescription", params)
+								# Validate the checked values. If they're ?, then inherit the original value.
+								if o_item_name == "?": o_item_name = item_name
+								if o_display_name == "?": o_display_name = display_name
+								if o_item_name != "?" and o_display_name != "?" and category != "?":
+									object_list.append((o_item_name, o_display_name, category, 0, 0, "?", "?", from_mod))
+
+								####################
+								## stations_group ##
+								####################
+								values = self.create_group_list(o_item_name, from_mod, obj, dir)
+								for entry in values:
+									if entry[0] != "?":
+										stations_groups.append(entry)
+
+							# Search for addonConfig
+							addonConfig = self.json_get("addonConfig", obj, error_on_fail=False)
+							if addonConfig != "?":
+								usesAddons = self.json_get("usesAddons", addonConfig, error_on_fail=True)
+
+								for addon in usesAddons:
+									a_item_name = self.json_get("name", addon)
+									addon_data = self.json_get("addonData", addon)
+									interact_data = self.json_get("interactData", addon_data)
+
+									###################
+									## Create Object ##
+									###################
+									panel = self.json_get("paneLayoutOverride", interact_data)
+									window = self.json_get("windowtitle", panel)
+									a_display_name = window["title"]
+									if a_item_name != "?" and a_display_name != "?" and category != "?":
+										object_list.append((a_item_name, a_display_name, category, 0, 0, "?", "?", from_mod))
+
+									####################
+									## stations_group ##
+									####################
+									filter = self.json_get("filter", interact_data)
+									for group in filter:
+										if group != "?":
+											stations_groups.append((group, a_item_name, from_mod))
+
+					else: # If it has no upgrade stages, check it as a normal object for groups
+						interact_data = self.json_get("interactData", read_data)
+						if interact_data != "?":
+							# Check for filter.
+							filter = self.json_get("filter", interact_data)
+							if filter != "?":
+								for group in filter:
+									stations_groups.append((group, item_name, from_mod))
+							else:
+								# Check config file
+								config_location = str(dir) + self.json_get("config", interact_data)
+								config = self.read_json(config_location)
+								if config != "?":
+									filter = self.json_get("filter", config)
+									for group in filter:
+										stations_groups.append((group, item_name, from_mod))
+
+
+		self.cursor.executemany("INSERT INTO objects VALUES(?, ?, ?, ?, ?, ?, ?, ?)", object_list)
+		self.cursor.executemany("INSERT INTO learn VALUES(?, ?, ?)", learned_list)
+		self.cursor.executemany("INSERT INTO stations_groups VALUES(?, ?, ?)", stations_groups)
+
+
+
+		#########################
+		## Create recipe lists ##
+		#########################
 		recipes = list(dir.glob("**/*.recipe"))
 		collected_recipes = [] # I'm going to collect all of the recipes and commit them to the database in an executemany to (hopefully) speed the process up.
-		recipes_average_time = 0
+		recipes_groups = []
+		inputs = []
+		outputs = []
 		for file in recipes:
-			in_time = datetime.now()
 			read_data = self.read_json(str(file))
-			input = ""
-			output = ""
-			station = ""
+			# generic = self.generic_object_data(read_data, from_mod, already_parsed=True)
 			duration = 0
 			name = "" # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
 
-			# Get inputs.
-			try:
-				input_field = read_data["input"]
-
-				try:  # Input stores an array of dictionaries
-					for i in input_field:
-						input += "{}/{}/".format(i["item"], i["count"])
-					input = input[:-1]
-				except KeyError:  # Input stores a dictionary
-					input = "{}/{}".format(input_field["item"], input_field["count"])
-			except KeyError:
-				logging.warning("Could not read input from file {}".format(Path(file).name))
-				input = "?"
-
-			# Get outputs.
+			#################
+			## Get outputs ##
+			#################
 			try:
 				output_field = read_data["output"]
-
 				try:  # Output stores a dictionary
 					name = output_field["item"]
-					output = "{}/{}".format(name, output_field["count"])
+					outputs.append((name, name, output_field["count"], from_mod))
 				except KeyError:  # Output stores an array of dictionaries
 					for i in output_field:
 						name += i["item "] # I'm not sure how this will look but hopefully this never happens please modders
-						output += "{}/{}/".format(name, i["count"])
-					output = output[:-1]
+						outputs.append((name, i["count"]))
 					name = name[:-1]
 					logging.warning("File {} is using an array for its output instead of a single dictionary. You monster.".format(file))
 			except KeyError:
-				output = "?"
+				name = "?"
+				outputs.append((name, name, -1, from_mod))
 				logging.warning("Could not read output from file {}".format(Path(file).name))
 
-			# Get station.
+			################
+			## Get inputs ##
+			################
 			try:
-				groups = read_data["groups"]
-				station = groups[0] # The first entry should always be the entry of the table.
+				input_field = read_data["input"]
+				try:  # Input stores an array of dictionaries
+					for i in input_field:
+						inputs.append((name, i["item"], i["count"], from_mod))
+				except KeyError:  # Input stores a dictionary
+					inputs.append((name, input_field["item"], input_field["count"], from_mod))
 			except KeyError:
-				station = "?"
 				logging.warning("Could not read input from file {}".format(Path(file).name))
+
+			################
+			## Get groups ##
+			################
+			try:
+				for group in read_data["groups"]:
+					recipes_groups.append((group, name, from_mod))
+			except KeyError:
+				recipes_groups.append(("?", name, from_mod))
+				logging.warning("Could not read input from file {}".format(Path(file).name))
+
 
 			# Get duration
 			try:
@@ -328,189 +418,306 @@ class database():
 				duration = 0.1 # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
 				logging.debug("Duration not specified in file {}".format(Path(file).name))
 
-			collected_recipes.append((name, station, duration, input, output, from_mod))
-			out_time = datetime.now()
-			time = out_time - in_time
-			if recipes_average_time != 0:
-				recipes_average_time = (recipes_average_time + time) / 2
-			else:
-				recipes_average_time = time
-
-		#print("Average recipes time: {}".format(recipes_average_time))
+			collected_recipes.append((name, duration, from_mod))
 
 		in_time = datetime.now()
-		self.cursor.executemany("INSERT INTO recipes VALUES(?, ?, ?, ?, ?, ?)", collected_recipes)
+		self.cursor.executemany("INSERT INTO recipes VALUES(?, ?, ?)", collected_recipes)
+		self.cursor.executemany("INSERT INTO recipes_groups VALUES(?, ?, ?)", recipes_groups)
+		self.cursor.executemany("INSERT INTO input VALUES(?, ?, ?, ?)", inputs)
+		self.cursor.executemany("INSERT INTO output VALUES(?, ?, ?, ?)", outputs)
 		out_time = datetime.now()
 
-		recipe_num = len(collected_recipes)
-		diff = out_time - in_time
-		print("It took {} to insert all recipes for an average of {} per recipe.".format(diff, diff / recipe_num ))
+		recipe_num = len(collected_recipes) # Used to calculate average time.
+		diff = out_time - in_time # Time it took to load all recipes in.
+		print("It took {} to insert all recipes for an average time of {}".format(diff, diff/recipe_num))
 
-
-
-		if False: # Temporarily taken out so I can test with the recipe database only.
-			# Index active items
-			# TODO: Many weapons have "builderConfig"s. These are essentially ways that the item can be created, E.G a staff may have fire, ice, electric etc. I need to include this some how if possible. Maybe check the wiki for inspiration.
-			# I'll need to learn to read lua to do this, it seems, so that makes me sad.
-			files = list(dir.glob("**/*.activeitem"))
-			fields = ["itemName", "power", "knockback", "level"]
-			# TODO: I really need to change how I treat an object based on its "category", rather than just hoping for the best.
-			for file in files:
-				read_data = self.read_json(str(file))
-				values = []
-				generic = self.generic_object_data(file, from_mod, table = "weapon")
-
-				# If the item is one handed, parse it generically.
-				if not generic[3]:
-					for field in fields:
-						try:
-							values.append(read_data[field])
-						except KeyError:
-							values.append("?")
-							logging.info("Could not find {} while searching {}".format(field, Path(file).name))
-						values.append("None") # There will be no alt ability as it is a single handed item
-
-				# If the object is two handed we'll need to parse it differently
-				else:
-					# Get name
-					try:
-						values.append(read_data["itemName"])
-					except KeyError:
-						values.append("?")
-						logging.info("Could not find itemName while searching {}".format(Path(file).name))
-
-					# Attempt to search for primary and secondary ability
-					try:
-						primary = read_data["primaryAbility"]
-						new_fields = ["power", "knockback"] # These are the fields we want to find either in the .projectile, or in projectileParameters
-						projectile = primary["projectileType"] # The type of projectile shot will determine default values.
-						powerProjectile = None # These is also a "power projectile" type on bows, which is likely the projectile used when perfectly timed.
-						projectile_parameters = primary["projectileParameters"]
-						projectile_default = None # TODO We need to create a table for .projectiles, and then read the value of the projectile to here to reference if an attempt fails.
-
-						# Attempt to fetch projectile parameters. Should If it fails, should search the projectileType's values instead.
-						for new_field in new_fields:
-							try:
-								values.append(projectile_parameters[new_field])
-							except KeyError: # Find the value in the .projectile instead.
-								values.append("?")
-								pass
-					# Likely means it uses a builder instead.
-					except KeyError:
-						values.append("?")
-						values.append("?")
-
-					# Get level
-					try:
-						values.append(read_data["level"])
-					except KeyError:
-						values.append("?")
-						logging.info("Could not find level while searching {}".format(Path(file).name))
-
-					# Get alt ability
-					values.append("?")
-
-				self.cursor.execute("INSERT INTO weapon VALUES (?, ?, ?, ?, ?, ?)", (values[0], values[1], values[2], values[3], values[4], from_mod))
-
-		self.connect("commit")
 		self.connect.commit()
 
 	def remove_entries_of_mod(self, mod_name):
-		tables = ["modlist", "learn", "id_convert", "recipes", "objects"]
+		"""Removes all entries of this mod from all databases.
+		:param mod_name: ID of the mod you wish to remove.
+		"""
+		tables = ["recipes", "recipes_groups", "stations_groups", "output", "input", "objects", "learn", "modlist"] # The names of all tables in the database.
 
 		for table in tables:
 			expr = "DELETE FROM {} WHERE from_mod=?".format(table)
 			self.cursor.execute(expr, (mod_name,))
 			self.connect.commit()
 
-	def search(self, table, column="", where_value="", regex=False, order=""):
-		"""
-		Search database.
+
+
+	def search(self, table, where_value="", order="", return_column="*"):
+		"""where_value
+		Search database a database for results.
 		Supports regex by filling out "where_value" like "REGEXP {}".
 
-		:param table: The table to select data from
-		:param column: Which column to select from in the table
-		:param where_value: What value to search for (required if column is used). Must include comparator if not regex (such as =, >= etc)
-		:param regex: Whether the "order" is a regular expression
-		:param order: What field(s) to order the list by
-		:return: All matching results
+		:param table: (str) The table to select data from
+		:param where_value: (array) An array of WHERE clauses, structured like ["column REGEXP 'value'", "column='value'"].
+		:param order: (str) What field(s) to order the list by
+		:param return_column: (str) Return only results from this column name.
+		:return: (Array) All matching results
 		"""
 
-		expr = "SELECT * FROM {}".format(table)
-		if column != "":
-			expr += " WHERE {} ".format(column)
-			if regex:
-				expr += "REGEXP ?"
-			else:
-				expr += "{}".format(where_value)
+		expr = "SELECT {} FROM {}".format(return_column, table)
+		if where_value:
+			for index, clause in enumerate(where_value):
+				if index == 0:
+					expr += " WHERE {}".format(clause)
+				else:
+					expr += " OR {}".format(clause)
 
 		if order != "":
 			expr += " ORDER BY {}".format(order)
 
-		if(regex):
-			self.cursor.execute(expr, [(where_value)])
-		else:
-			self.cursor.execute(expr)
+		self.cursor.execute(expr)
 
 		return self.cursor.fetchall()
 
 
+	def convert_id(self, id="", name=""):
+		"""
+		Search the 'objects' table for the converted name of this object.
+		:param id: (str) The object's ID. If this is left blank, I'll assume
+		:param name: (str) The object's name, to convert into an ID.
+		:return: (str) if id: The matching display_name for this object. May contain colour highlighting that needs to be parsed (E.G ^orange;Table^reset;).
+				(array) if name: An array of all matching IDs.
+		"""
+		if id != "": # Searching for ID will only match exact results. This is because I'm assuming anyone who searches an ID has the full ID.
+			result = self.search("objects", where_value=["item_name='{}'".format(id)])
+			try:
+				return result[0][1]
+			except IndexError:
+				logging.warning("Search for the ID {} in objects returned nothing".format(id))
+				return "?"
+		else: # Searching for a display_name will always use RegEx
+			where_field = "display_name REGEXP '{}'".format(name)
+			result = self.search("objects", where_value=[where_field])
+			all_results = []
+			for value in result: # Cycle through all results...
+				all_results.append(value[0]) # And store the first entry of the tuple (the item_name) in an array.
+			return all_results
+
+
+	def search_groups(self, group):
+		"""Search the 'groups' database for a group, and return all tables that can craft this group.
+		:param group: (str) The name of the group you wish to search for
+		:return: Array of all IDs capable of crafting this group.
+		"""
+		result = self.search("groups", column="grouping", where_value=group, regex=True, return_column="station")
+		try:
+			return result[0]
+		except IndexError:
+			logging.warning("Search for the group {} in groups returned nothing".format(group))
+			return "?"
+
+	def remove_colour_tags(self, text):
+		type_of_var = type(text)
+		if type_of_var == str:
+			return re.sub(self.re_colour_tag, '', text)
+		elif type_of_var == list:
+			return_list = []
+			for val in text:
+				return_list.append(re.sub(self.re_colour_tag, '', val))
+			return return_list
+		else:
+			logging.warning("remove_colour_tags was called with a value that is not a string or a list. Value: {}".format(text))
+
+
+	def search_recipe(self, output, input, duration, bench, from_mod):
+		"""
+		Search for a set of recipes that contains ALL of the input data. If a field is left blank, it is not searched for.
+		:param output: (str) The display_name of one of the outputs of the recipe. This will also be the name of the recipe (I hope)
+		:param input: (str) The display_name of one of the inputs of the recipe
+		:param duration: (float) The time it takes for the recipe to craft.
+		:param bench: (str) The display_name of the bench that this recipe can be crafted at.
+		:param from_mod: (str) The friendly_name of the mod a recipe comes from
+		:return: (set) Any recipes that match ALL given fields.
+		If sokme data could not be parsed: (str) "?"
+		"""
+		def set_merge(master_set, array):
+			array = set(array)
+			if master_set:
+				return master_set.intersection(array)
+			else: # If the master_set has already had stuff added to it.
+				return array
+
+
+		all_ids = set()
+		# This method I'm going to do is probably very bad. I'm creating *dozens* of where_value searches, because I'm storing IDs instead of display_names.
+		# Too bad!
+		# What I'm doing is running a SQL search for each provided field, then comparing the intersection of all of these sets to figure out which recipes are valid candidates.
+		if input:
+			self.cursor.execute("SELECT recipe_name FROM input WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP '{}')".format(input))
+			semi_set = []
+			for row in self.cursor.fetchall():
+				semi_set.append(row[0])
+			all_ids = set_merge(all_ids, semi_set)
+			if not all_ids: return "?"
+
+		if output:
+			self.cursor.execute("SELECT recipe_name FROM output WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP '{}')".format(output))
+			semi_set = []
+			for row in self.cursor.fetchall():
+				semi_set.append(row[0])
+			all_ids = set_merge(all_ids, semi_set)
+			if not all_ids: return "?"
+
+		if duration:
+			# TODO: I need to find a way to allow for comparisons of duration (And of quantity of input/output)
+			try:
+				self.cursor.execute("SELECT name FROM recipes WHERE duration={}".format(duration))
+			except sqlite3.OperationalError:
+				logging.error("Failed to search for given duration in search_recipe. Duration given: {}".format(duration))
+				return "?"
+			semi_set = []
+			for row in self.cursor.fetchall():
+				semi_set.append(row[0])
+			all_ids = set_merge(all_ids, semi_set)
+			if not all_ids: return "?"
+
+		if bench:
+			self.cursor.execute("""SELECT recipe_name FROM recipes_groups WHERE grouping IN (
+				SELECT grouping FROM stations_groups WHERE station IN (
+					SELECT item_name FROM objects WHERE display_name REGEXP '{}'
+				)
+			)""".format(bench))
+			semi_set = []
+			for row in self.cursor.fetchall():
+				semi_set.append(row[0])
+			all_ids = set_merge(all_ids, semi_set)
+			if not all_ids: return "?"
+
+		if from_mod:
+			self.cursor.execute("SELECT name FROM recipes WHERE from_mod IN (SELECT from_mod FROM modlist WHERE friendly_name REGEXP '{}')".format(from_mod))
+			semi_set = []
+			for row in self.cursor.fetchall():
+				semi_set.append(row[0])
+			all_ids = set_merge(all_ids, semi_set)
+			if not all_ids: return "?"
+
+		return all_ids
+
+
+	def get_recipe_information(self, recipe_ids):
+		"""
+		This will search through all recipe IDs provided, and return a 2D array containing all relevant information.
+		:param recipe_ids: (array of strings) The ID of a recipe. This must be an exact name.
+		:return: A 3D array with 6 cells per entry. The following array is for a single given recipe_id:
+		[
+			[
+				[recipe_id, duration, from_mod], [learned_object1, learned_object2],
+				[output1, output_count1, output2, output_count2], [input1, input_count1, input2, input_count2],
+				[workbench_name1, workbench_name2], [grouping1, grouping2]
+			]
+		]
+		"""
+		master_array = [] # This will contain all other arrays, and be returned.
+
+		for recipe in recipe_ids:
+			sub_array = [] # The array all of the following data will be contained in.
+			recipe_id = recipe
+
+			self.cursor.execute("SELECT * FROM recipes WHERE name='{}'".format(recipe_id))
+			recipes_db = self.cursor.fetchall()
+			if not recipes_db:
+				return "No Recipes"
+			recipe_duration = recipes_db[0][1]
+			recipe_mod = recipes_db[0][2]
+			group1 = [recipe_id, recipe_duration, recipe_mod]
+
+			learned_from = []
+			self.cursor.execute("SELECT display_name FROM objects WHERE item_name IN (SELECT from_object FROM learn WHERE recipe='{}')".format(recipe_id))
+			for object in self.cursor.fetchall():
+				learned_from.append(object[0])
+
+			recipe_groups = []
+			self.cursor.execute("SELECT grouping FROM recipes_groups WHERE recipe_name='{}'".format(recipe_id))
+			for group in self.cursor.fetchall():
+				recipe_groups.append(group[0])
+
+			recipe_outputs = []
+			self.cursor.execute("SELECT * FROM output WHERE recipe_name='{}'".format(recipe_id))
+			for output in self.cursor.fetchall():
+				recipe_outputs.append(output[1])
+				recipe_outputs.append(output[2])
+
+			recipe_inputs = []
+			self.cursor.execute("SELECT * FROM input WHERE recipe_name='{}'".format(recipe_id))
+			for input in self.cursor.fetchall():
+				recipe_inputs.append(input[1])
+				recipe_inputs.append(input[2])
+
+			recipe_tables = []
+			self.cursor.execute("""SELECT display_name FROM objects WHERE item_name IN (
+				SELECT station FROM stations_groups WHERE grouping IN (
+					SELECT grouping FROM recipes_groups WHERE recipe_name='{}'))""".format(recipe_id))
+			# This last nested SELECT is needless. I already have stored all of the grouping values in recipe_groups. But SQLite3 has forced my hand.
+			# TODO: Come back and figure out why SQLite hates me.
+			for table in self.cursor.fetchall():
+				recipe_tables.append(table[0])
+
+			sub_array.append(group1)
+			sub_array.append(learned_from)
+			sub_array.append(recipe_outputs)
+			sub_array.append(recipe_inputs)
+			sub_array.append(recipe_tables)
+			sub_array.append(recipe_groups)
+			master_array.append(sub_array)
+
+		return master_array
+
+
+
+
+
 
 	# Private functions. Things that will only be used within this class.
-	def generic_object_data(self, directory, from_mod, table="None"):
-		"""
-		:param dictionary: The directory to parse for generic data.
-		:param table: The location of the companion detailed table that this object will contain. "None" is default.
-		:param from_mod: The name of the mod this entry belongs to.
-		:return: Returns array of parsed data
-		"""
-		# TODO: Make this to simply get the data, and not automatically submit it.
-		read_data = self.read_json(str(directory))
-		fields = ["itemName", "shortdescription", "price", "twoHanded", "category", "rarity", "description"]
-		values = []
 
-		for field in fields:
-			try:
-				values.append(read_data[field])
-			except KeyError:
-				if field == "twoHanded":
-					values.append(0)
-					continue
-				elif field == "itemName":
-					try:
-						values.append(read_data["objectName"])
-						continue
-					except KeyError:
-						values.append("?")
+	# Remove instanecs of filename from this.
+	def create_group_list(self, name, from_mod, obj, directory):
+		"""
+		Used to parse an object and check if it contains elements of a crafting table. If so, return information required for a group_list entry.
+		:param name: (str) Name of this object.
+		:param from_mod: (str)
+		:param obj: (str) The json you're attemping to check.
+		:param directory: The directory of the unpacked files.
+		"""
+		all_groups = []
+		interact_data = self.json_get("interactData", obj)
+		if interact_data != "?":
+			groups = ""
+			# Check for filter.
+			filter = self.json_get("filter", interact_data)
+			if filter != "?":
+				for group in filter:
+					all_groups.append((group, name, from_mod))
+			else:
+				# Check config file
+				config_location = str(directory) + self.json_get("config", interact_data)
+				config = self.read_json(config_location)
+				if config != "?":
+					filter = self.json_get("filter", config)
+					for group in filter:
+						all_groups.append(group, name, from_mod)
 				else:
-					values.append("?")
-				logging.warning("Could not find {} for generic table while searching {}".format(field, Path(directory).name)) # TODO add in more detail about which file is being checked.
-
-
-		self.cursor.execute("INSERT INTO objects VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (values[0], values[1], values[2], values[3], values[4], values[5], values[6], table, from_mod))
-		return values
-
-	def get_path_name(self, directory):
-		dir_len = len(directory)
-		filename = ""
-
-		for i in range(dir_len):
-			if directory[-i] == "\\":
-				for j in range(i):
-					filename = filename + directory[-i + j]
-				break
-		return filename
+					logging.warning("Cannot read config file at {}".format(config_location))
+					all_groups.append(("?", name, from_mod))
+		else:
+			all_groups.append(("?", name, from_mod))
+		return all_groups
 
 	def read_json(self, file_path):
-		"""Attempts to read the contents of a JSON file. As Starbound allows for comments in its files, I need to be able to delete these comments if they arise.
+		"""
+		Attempts to read the contents of a JSON file. As Starbound allows for comments in its files, I need to be able to delete these comments if they arise.
+		:param file_path: (str) The location of the file on disk you wish to read OR a string of the full file.
 		:return: Returns a dictionary of the JSON file, or None if the operation failed.
 		"""
 		with open(file_path) as file:
 			try:
 				data = json.load(file)
 				return data
-			except json.decoder.JSONDecodeError as e:
-				logging.warning("Erroneous JSON code in {}, attempting to fix...".format(Path(file_path).name))
+			except json.decoder.JSONDecodeError as ex:
+				#logging.debug("Erroneous JSON code in {}, attempting to fix...".format(Path(file_path).name))
 
 				file.seek(0)  # We've already read the file once, so reset the seek.
 				new_file = file.read()  # Convert the file to a string so we can run functions on it.
@@ -535,15 +742,14 @@ class database():
 						new_file = new_file.replace(comment, "")
 					else:
 						break
-				#print(new_file)
 
 				# Try to read the string again after all comments have been removed.
 				try:
 					data = json.loads(new_file)  # Changed to loads with an s as we're reading a string, not a file.
-					logging.info("Successfully removed comments!")
+					#logging.debug("Successfully removed comments!")
 					return data
-				except Exception as e:
-					logging.warning("Cannot load file, error {}. Skipping file...".format(e))
+				except Exception as ex:
+					logging.warning("Cannot load file JSON file {}, error {}.".format(Path(file_name).name, ex))
 					data = None
 					return data
 
@@ -561,49 +767,74 @@ class database():
 		self.b_new_mods = False  # This will evaluate if there's a new mod detected. New mods should be pulled from self.mod_files
 		self.b_lost_mods = False  # Whether there are mods that used to be on here, but are no longer detected.
 
-	def create_tables(self, cursor):
+		self.filename = "" # The name of the file that we're currently parsing.
+
+	def create_tables(self):
 		### CREATE TABLES ###
-		cursor.execute("begin")
+		self.cursor.execute("begin")
+		# Notes about database:
+		# Every entry should always contain an accurate "from_mod" field.
+		# Any place that would have to store multiple entries (such as recipe input fields), the values are put into a different database, and connected by name. See diagram for relationships.
 
 		# Objects table
-		cursor.execute("""CREATE TABLE objects (
+		self.cursor.execute("""CREATE TABLE objects (
 			item_name TEXT,
 			display_name TEXT,
+			category TEXT,
 			price INTEGER,
 			two_handed INTEGER,
-			category TEXT,
 			rarity TEXT,
 			description TEXT,
-			detailed_table TEXT,
 			from_mod TEXT
 			)""")
 
 		# Recipes table
-		cursor.execute("""CREATE TABLE recipes (
+		self.cursor.execute("""CREATE TABLE recipes (
 			name TEXT,
-			station TEXT,
 			duration REAL,
-			input TEXT,
-			output TEXT,
 			from_mod TEXT
 			)""")
 
 		# Learning table
-		cursor.execute("""CREATE TABLE learn (
+		self.cursor.execute("""CREATE TABLE learn (
 			from_object TEXT,
-			recipes TEXT,
+			recipe TEXT,
 			from_mod TEXT
 			)""")
 
-		# ID to Name table.
-		cursor.execute("""CREATE TABLE id_convert (
-			id TEXT,
-			name TEXT,
+		# The following four tables are essentially used as arrays in other tables. SQLite3 doesn't support arrays as a datatype.
+		# Input table
+		self.cursor.execute("""CREATE TABLE input (
+			recipe_name TEXT,
+			item TEXT,
+			count INTEGER,
+			from_mod TEXT
+			)""")
+
+		# Output table
+		self.cursor.execute("""CREATE TABLE output (
+			recipe_name TEXT,
+			item TEXT,
+			count INTEGER,
+			from_mod TEXT
+			)""")
+
+		# station_groups table
+		self.cursor.execute("""CREATE TABLE stations_groups (
+			grouping TEXT,
+			station TEXT,
+			from_mod TEXT
+			)""")
+
+		# recipes_groups table
+		self.cursor.execute("""CREATE TABLE recipes_groups (
+			grouping TEXT,
+			recipe_name TEXT,
 			from_mod TEXT
 			)""")
 
 		# Modlist table.
-		cursor.execute("""CREATE TABLE modlist (
+		self.cursor.execute("""CREATE TABLE modlist (
 			checksum TEXT,
 			from_mod TEXT,
 			friendly_name TEXT,
@@ -611,22 +842,44 @@ class database():
 			version TEXT
 			)""")
 
-		cursor.execute("commit")
+		self.cursor.execute("commit")
 
-	def regexp(self, expr, item):
-		reg = re.compile(expr)
-		return reg.search(item) is not None
+	def json_get(self, key, data, error_on_fail=True, error_message=""):
+		"""
+		Provides generic error handling when retrieving a key:value from a dictionary.
+		:param key: (str) The key that you're trying to read.
+		:param data: (dict) The dictionary you're trying to read from.
+		:param error_on_fail: (bool) Whether it should print an error message if this operation fails
+		:param error_message: (str) The message that should be printed if this operation fails.
+		"""
+		try:
+			val = data[key]
+		except KeyError:
+			val = "?"
+			if error_on_fail:
+				if error_message:
+					logging.warning(error_message)
+				else:
+					logging.warning("File {} has no key {}.".format(self.filename, key))
+		return val
 
 
-	def generate_checksum(self, file_path):
-		#logging.debug("Generating checksum for file located at {}...".format(file_path))
-		hash_md5 = md5()
-		with open(file_path, "rb") as f:
-			for chunk in iter(lambda: f.read(4096), b""):
-				hash_md5.update(chunk)
-		checksum = hash_md5.hexdigest()
+def regexp(expr, item):
+	reg = re.compile(expr, re.I) # This will make ALL searches case insensitive. Too bad!
+	return reg.search(item) is not None
 
-		return checksum
+
+def generate_checksum(file_path):
+	#logging.debug("Generating checksum for file located at {}...".format(file_path))
+	hash_md5 = md5()
+	with open(file_path, "rb") as f:
+		for chunk in iter(lambda: f.read(4096), b""):
+			hash_md5.update(chunk)
+	checksum = hash_md5.hexdigest()
+
+	return checksum
+
+
 
 
 if __name__ == "__main__":
