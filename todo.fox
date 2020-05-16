@@ -1,0 +1,44 @@
+Current project goal:
+  Produce a demo version for people to use.
+  
+  
+  
+TODO list:
+  IMPORTANT: When I come to making the .exe, I need to change anything that interacts with the directory (Such as self.program_folder in database.py) to be reflective of that.
+  Shinigami Apples#7335 from the Frackin Universe server tested having multiple outputs for a recipe, and was able to confirm that it doesn't really work. I will change my code to detect these as errors.
+  Rename ALL instances of "input" - It currently overwrite the namespace of "input()" which gets user input lmao
+  Figure out a way to warn users of just how god damn slow unpacking files is going to be.
+  Investigate why values are being doubled. - It seems upgradable workstations are being entered twice, some how.
+  Investigate why "Armourworks" was renamed armory - This seems to be an error with upgradable stations
+  Allow the user to omit a world, maybe by typing -(words to omit) or -word
+  Test adding poorly formatted/erroneous JSON files (Missing fields, completely broken stuff, etc.)
+  Change the "where_value" to allow for command inputs (E.G telling it that this should be the start of a set of brackets)
+  Allow the user to search for recipes based on what object it's learned from.
+  Add in more details to the metadata about unpack time/parsing time
+  Update my staged DB and my modlist DB to include information about unpack/index/steamID
+  Finish making object search
+  Add optional case sensitivity to searches.
+  Consider removing error check for the key "filter" when parsing json
+  When the user searches something that returns multiple results, instead of displaying all of them, I want to put them in a "staging" area, where they have to choose one of a list of recipes to view. I should allow them to go in/out of this stanging area between different recipes.
+  Implement subqueries for main search method
+  Update relationship table to include examples of how the fields store data.
+  Finish creating the "user input to search" for recipes.
+  Ensure that any time I search for RegEx values, I catch errors for poorly created values.
+  Consider changing all "names" I'm storing things under as their display_names. This will allow for better searching with regex. - This will require me to restructure all of my search functions to allow for this.
+  Update the search function to allow for multiple where clauses.
+  Line 629 (Removing comments from .json files): I've seen // be used in actual values (e.g "name": "//duck". I should change this to regex so I can account for this in the future.
+  Figure out why "pleacekeeper1" isn't being indexed.
+  The metadata file is optional, so I need to account for that not being there.
+
+  Remove logging.debug from recipe parsing for "duration". I know the default value and many don't have this field.
+  Change recipe database to expose input/output values into their own databases. This is to allow me to search for things like "less than 10 tungsten"
+  
+  For now I'm only going to allow for the user to specify a single input/output/etc for recipes, but I think it could certainly be possible to allow for multiple quantities and the like at a later date.
+  Add colour formatting to the search function.
+  
+  
+  Maybe I could add in "developer search" mode, that reverses the search to allow for searching IDs instead of display_names
+  
+  Toy around with generating a checksum for a file/folder structure, so that when we come to updating a mod, we can just create a checksum to check if there was a change. (This might be a lot of work for major file size increase and minimal performance increase)
+  
+  Idea for another part of the program: Make a "mod" that creates another mod, that will add all craftables to the player's pockets.

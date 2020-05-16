@@ -4,7 +4,8 @@ try:
 	from subprocess import run # Used to unpack the .pak files.
 	from os import (
 		mkdir as makedir, # I renamed this because I was using "makedirs" and switched to this.
-		path
+		path,
+		remove
 	)
 	from shutil import rmtree
 	from hashlib import md5 # Used to generate checksums and verify files.
@@ -13,6 +14,7 @@ try:
 	import sqlite3
 	import json
 	from datetime import datetime
+	import traceback
 except ModuleNotFoundError as e:
 	print("{}\nThis likely means that there's a file missing. If so, please contact me (CrunchyDuck) and show me this error message.".format(e))
 	input()
@@ -25,8 +27,17 @@ def Database(steamapps_directory):
 	object.mods_dir = Path(str(object.steam_dir) + "/workshop/content/211820")  # Folder for steam mods.
 	object.starbound_dir = Path(str(object.steam_dir) + "/common/Starbound")  # Starbound folder
 	object.starbound_mods_dir = Path(str(object.starbound_dir) + "/mods")  # Location of the mods folder in the starbound folder
+	object.unpack_location = "{}/unpack".format(object.program_folder)
 	return object
 
+
+class timer():
+	"""Very basic object that is used to track how much time something took."""
+	def t_in(self):
+		self.time_in = datetime.now()
+	def t_out(self):
+		self.time_out = datetime.now()
+		return self.time_out - self.time_in
 
 
 class database():
@@ -35,14 +46,16 @@ class database():
 		self.program_folder = str(Path.cwd().parent) # The location of this program's master folder.
 		self.data_folder = "{}/data".format(self.program_folder)
 
-		# Set when the object is called. These are all Path objects.
-		self.steam_dir = "" # This will be used to search for starbound's files.
-		self.mods_dir = ""  # Folder for steam mods.
-		self.starbound_dir = ""  # Starbound folder
-		self.starbound_mods_dir = ""  # Location of the mods folder in the starbound folder
+		# Set when the object is called.
+		self.steam_dir = "" # This will be used to search for starbound's files. (Path)
+		self.mods_dir = ""  # Folder for steam mods. (Path)
+		self.starbound_dir = ""  # Starbound folder (Path)
+		self.starbound_mods_dir = ""  # Location of the mods folder in the starbound folder (Path)
+		self.unpack_location = "" # Location where files will be unpacked to (string)
+
 
 		# Database
-		db_file = self.data_folder + "/recipe_test.foxdb" # Location of the database file on the PC.
+		db_file = self.data_folder + "/database.foxdb" # Location of the database file on the PC.
 		b_make_db = False # If we detect the file missing, or detect any missing tables, create them.
 		if not path.isfile(db_file):
 			b_make_db = True
@@ -57,139 +70,163 @@ class database():
 		if b_make_db:
 			self.create_tables()
 
-		self.re_block_comment = re.compile(r'(/\*)(.|\n)*(\*/)') # This is used to search a JSON file for block comments.
-		self.re_colour_tag = re.compile(r'\^.*?;')
+		self.re_line_comment = re.compile(r'//.*') # This can find all line comments in JSON (//Text after this). TODO: I need to name sure this DOESN'T delete comments within keys/values. We'll have issues if it does.
+		self.re_block_comment = re.compile(r'(/\*)(.|\n)+?(\*/)') # This is used to search a JSON file for block comments.
+		self.re_colour_tag = re.compile(r'\^.*?;') # This will find colour tags in the names of objects, E.G ^orange;nameofobject^reset;
 
 		# Declares many more variables that may need to be reset at times.
 		self.reset()
 
 
+	# Process for updating the database:
+	# index_mods > prime_files > parse_files
+	# At each point in this process, it is stopped to allow user input on whether to continue now or later.
+	# I also allow a "do all" option so the user can just set it to work and forget about it.
+	def full_index(self):
+		self.index_mod()
+		self.prime_files()
+		self.parse_files()
 
 	def index_mods(self):
 		# Search for all mods in the user's files (steam mods and on disk mods)
 		self.reset() # This will make sure that all variables that could have been used will be reset.
 
+		# Get all mod files the player has, so we can scan them for checksums.
 		starbound_mod_files = list(self.starbound_mods_dir.glob("*.pak"))  # All mods within the starbound mod directory.
-		steam_mod_files = list(self.mods_dir.glob("**/*.pak"))  # Get all .pak stored within the steam mod directory
-		all_mods = starbound_mod_files + steam_mod_files # Since we're checking mods based on their checksums, where they come from won't change how we handle them.
-		all_mods.append(str(self.starbound_dir) + "/assets/packed.pak") # This will add the baseg game assets in. You know, just in case.
+		steam_mod_files = list(self.mods_dir.glob("**/*.pak"))  # Get all .pak stored within all folders in the steam mod directory
+		all_mods = starbound_mod_files + steam_mod_files
+		all_mods.append(str(self.starbound_dir) + "/assets/packed.pak") # This will add the base game assets in. You know, just in case they some how lose the whole database. Or there's an update (There won't be)
 
-		with open(self.program_folder + "/data/modlist.fox") as f:
-			self.indexed_checksums = re.findall(r"(^.*)(?=/)", f.read(), flags=re.M) # A list of all mods that we have already indexed.
-			f.seek(0)
-			self.indexed_names = re.findall(r"(?<=/).*", f.read(), flags=re.M) # All of the names to complement the checksums so we can identify them.
-			# TODO here. I'm going to change this over to an SQL database, so if the DB gets corrupted it'll automatically deal with the modlist.
+		# Get all of the indexed checksums from our database, to see which mods do not need to be added.
+		self.cursor.execute("SELECT * FROM modlist")
+		modlist = self.cursor.fetchall()
+		self.indexed_checksums = []
+		self.indexed_friendly_names = []
+		for mod in modlist:
+			self.indexed_checksums.append(mod[0])
+			self.indexed_friendly_names.append(mod[1])
 
+		# Get all files that are already staged (already unpacked)
+		self.cursor.execute("SELECT checksum FROM unpacked_files")
+		cs = self.cursor.fetchall()
+		staged_checksums = []
+		staged_found = [] # This will stored all of the staged files that we found. If a staged file isn't found, we'll delete it because the user no longer has it.
+		for checksum in cs:
+			staged_checksums.append(checksum[0])
+
+		# Check the checksum of all mods the player has installed against our database, to see which ones we recognize.
 		for mod in all_mods:
 			mod_id = generate_checksum(mod)
-			if mod_id not in self.indexed_checksums:
+			# Mod is already indexed.
+			if mod_id in self.indexed_checksums:
+				logging.debug("Existing checksum {} found".format(mod_id))
+				self.found_mods.add(mod_id)
+			# Mod is unpacked already and just needs to be parsed.
+			elif mod_id in staged_checksums:
+				staged_found.append(mod_id)
+				logging.debug("Staged checksum {} found".format(mod_id))
+			# Mod is not recognized, and should be unpacked.
+			else:
 				logging.debug("New checksum {} found".format(mod_id))
 				self.mod_files.append(str(mod))
 				self.mod_checksums.append(mod_id)
-			else:
-				logging.debug("Existing checksum {} found...".format(mod_id))
-				self.found_mods.add(mod_id)
 
 		# Check if there are any mods that were NOT found from the modlist we had kept.
-		previous_modlist = []
-		for i in range(int(len(self.indexed_checksums))):
-			previous_modlist.append(self.indexed_checksums[i]) # Fetch all checksums from the modlist.
-		previous_modlist = set(previous_modlist) # Turn it into a set so that we can easily remove duplicates.
-
-		# Report undetected checksums.
-		self.undetected_checksums = previous_modlist - self.found_mods
-		if self.undetected_checksums: # This will be True if there's items in this set.
-			self.b_lost_mods = True
+		self.undetected_checksums = set(self.indexed_checksums) - self.found_mods
+		if self.undetected_checksums:
+			self.b_lost_mods = True # This will be True if there are mods we didn't find.
 			for id in self.undetected_checksums:
 				lost_index = self.indexed_checksums.index(id) # What position the lost checksum is in.
 				lost_name = self.indexed_names[lost_index]
 				self.lost_mods.append(lost_name)
+				logging.info("Mod {} was not found. Mod may have been removed or updated".format(lost_name)) # Report undetected checksums.
 
-				logging.info("Mod {} was not found. Mod may have been removed or updated".format(lost_name))
+		# Check if there were any staged mods that were NOT found.
+		undetected_staged = set(staged_checksums) - set(staged_found)
+		if undetected_staged:
+			# Delete any staged we couldn't detect as they'll no longer be useful
+			for checksum in undetected_staged:
+				self.remove_staged(checksum)
 
-		return "OK" # I don't know what else to return so I'll just leave something I can use to check it was successful.
+		new_files = False
+		if self.mod_files:
+			new_files = True
+		return new_files # Will return True if there are unrecognized mods.
 
-	def update(self):
+	def prime_files(self):
+		"""
+
+		:return:
+		"""
 		# TODO - Maybe I can allow the user to unpack in one session, and then parse them on another?
 		# Once we've verified which checksum are okay/not found/new, unpack the new assets so we can parse them and store their data.
 
 		# Unpack all mods we don't recognize
 		if self.b_new_mods:
-			unpack_exe = str(self.starbound_dir) + "/win32/asset_unpacker.exe" # The location of teh asset unpacker. This converts .pak files into their source code.
-			unpack_location = "{}/unpack".format(self.program_folder) # The unpack directory in this program.
-
-			# Verify the unpack too exists on the user's computer.
-			if not Path(unpack_exe).exists:
-				logging.critical("""Could not find asset_unpacker.exe in the Starbound files.
-				You haven't deleted it, have you? If you have, why on earth-.
-				It should be located at {}
-				If it is missing, please verify the integrity of your game files.
-				If it is not, contact me so I can figure out where my code is stupid.""".format(unpack_exe))
-				exit() # Close the program because it cannot possibly run.
-
-			# Clear any existing unpack files. Just in case.
-			if Path(unpack_location).exists():
-				rmtree(unpack_location) # This will remove any files from the last unpacks that might not have gotten cleaned up.
-			makedir(unpack_location)
-
-
-			# Unpack mods.
-			for index, mod in enumerate(self.mod_files):
-				logging.debug("Unpacking {}...".format(mod))
-
-				mod_unpack_location = "{}/{}".format(unpack_location, self.mod_checksums[index])  # The place we'll unpack mods temporarily to parse through. Each mod will have its own folder within this. The folder name will be its checksum.
-				makedir(mod_unpack_location)
-				asset_packed_path = mod
-				unpack_command = "{} \"{}\" \"{}\"".format(unpack_exe, asset_packed_path, mod_unpack_location)
-
-				run(unpack_command) # Unpack the files. There's almost certainly going to be errors with this that I cannot fathom, so I'll need to rely on community testing.
-				with open(self.program_folder + "/data/modlist.fox", "a") as f: self.indexed_checksums.write(self.mod_checksums[index] + "\n")
-				# TODO: Get name of object from metadata here.
-
-				logging.debug("Finished unpacking {}".format(mod))
-				break
-
-			# Update the database with the unpacked mods
-			def update_database(unpacked_mods_dir):  # With the newly unpacked mods, we need to go over all the files and pick out the important data.
-				def get_recipes():
-					return directory_of_recipes
-
-				def get_objects():
-					# File extensions that contain data we'll need:
-					# .liqitem, .object .matitem, .chest, .legs, .head, .activeitem, .augment, .back, .beamaxe, .consumable, .currency, .flashlight, .harvestingtool, .inspectiontool, .instrument, .item, .miningtool,, .objectdisabled, .painttool,
-					# .thrownitem, .tillingtool, .wiretool, .projectile
-					# .material files are for placed blocks - Useful but not here. .monstertype is for monsters.
-					return directory_of_objects
-
-				def update_objects():
-					def update_learnDB():  # This database will contain any recipe that is learned from picking up an object, and what you learn from it.
-						return nothing
-
-					return nothing
-
-				def update_recipes():
-					def update_inputDB():  # The input db needs to be separate from the update db because it is often an array
-						return nothing
-
-					def update_outputDB():  # It's possible I'll need to do the same as the input DB, as it is *possible* albeit uncommon for a mod to have multiple outputs.
-						return nothing
-
-					return nothing
+			# Unpack mods that were found to need that.
+			for mod in self.mod_files:
+				self.unpack(mod, checksum)
+			# Maybe I can update the metadata here, to more accurately index them before parsing.
 
 		# Go over any mods that are missing.
 		if self.b_lost_mods:
-			# Delete their entries in databases
+			for mod in self.lost_mods:
+				self.remove_entries_of_mod(mod_checksum=mod)
+		return "Primed"
 
-			# If there are any
-			pass
-
-	def unpack(self, filepath):
+	def unpack(self, unpack_target, checksum):
 		"""
 		Unpacks files using Starbound's tool provided for it.
-		:param filepath: (str) The location of the .pak file to unpack.
+		:param unpack_target: (str) The location of the .pak file to unpack.
+		:param checksum: (str) What to name the folder it's unpacked to.
 		:return: (str) Directory files were unpacked to
 		"""
-		return unpacked_dir
+		try:
+			folder_name = checksum
+			unpack_exe = str(self.starbound_dir) + "/win32/asset_unpacker.exe"  # The location of the asset unpacker. This converts .pak files into their source code.
+			unpack_location = "{}/unpack".format(self.program_folder)  # The unpack directory in this program.
+	
+			# Verify the unpack tool exists on the user's computer.
+			if not Path(unpack_exe).exists:
+				logging.critical("""Could not find asset_unpacker.exe in the Starbound files.
+							You haven't deleted it, have you? If you have, why on earth-
+							It should be located at {}
+							If it is missing, please verify the integrity of your game files.
+							If it is not, contact me so I can figure out where my code is stupid.""".format(unpack_exe))
+				return "Cannot Unpack"
+
+			# Clear any existing unpack files. Just in case.
+			if Path(unpack_location).exists():
+				rmtree(unpack_location)  # This will remove any files from the last unpacks that might not have gotten cleaned up.
+			makedir(unpack_location)
+	
+			# Begin unpack
+			logging.debug("Unpacking {}...".format(unpack_target))
+			mod_unpack_location = "{}/{}".format(unpack_location, folder_name)  # The place we'll unpack mods to parse through. Each mod will have its own folder within this. The folder name will be its checksum.
+			makedir(mod_unpack_location)
+			asset_packed_path = unpack_target
+			unpack_command = "{} \"{}\" \"{}\"".format(unpack_exe, asset_packed_path, mod_unpack_location)
+
+			run(unpack_command)  # Unpack the files. There's almost certainly going to be errors with this that I cannot fathom, so I'll need to rely on community testing.
+			self.cursor.execute("INSERT INTO unpacked_files VALUES ?", (checksum,)) # Add this to the list of staged files.
+	
+			logging.debug("Finished unpacking {}".format(unpack_target))
+			return unpacked_dir
+
+		except Exception as e:
+			logging.error("Unknown error occurred while attempting to unpack {}. Trackback:\n{}\n".format(unpack_target, traceback.format_exc()))
+			return "UNPACK FAILED"
+
+	def parse_files(self):
+		"""
+		Parse all files that are currently staged.
+		"""
+		# Get a list of all currently unpacked files
+		self.cursor.execute("SELECT checksum FROM unpacked_files")
+		staged_files = self.cursor.fetchall()
+		for checksum in staged_files:
+			folder_dir = self.program_folder + "/{}".format(checksum)
+			self.fill_db(folder_dir, checksum)
 
 	def fill_db(self, filepath, checksum):
 		"""
@@ -209,15 +246,17 @@ class database():
 		values = [] # A generic field we'll store things in temporarily
 		from_mod = "" # This is the mod that this unpack belongs to.
 
-		# Search for all data we can pull.
-		read_data = self.read_json(meta)  # The contents of the file.
+		##############
+		## METADATA ##
+		##############
+		read_data = self.read_json(meta)
 		for field in fields:
 			try:
 				values.append(read_data[field])
 			except KeyError:
 				values.append("?")
 				logging.info("Could not find {} while searching {}".format(field, Path(meta).name))
-		from_mod = values[0] # This will be used by following fields to indentify which mod this came from.
+		from_mod = values[0] # This will be used by following fields to identify which mod this came from.
 
 		self.cursor.execute("INSERT INTO modlist VALUES (?, ?, ?, ?, ?)", (checksum, values[0], values[1], values[2], values[3]))
 
@@ -227,131 +266,149 @@ class database():
 
 		for exten in extensions:
 			all_files += list(dir.glob("**/*.{}".format(exten)))
+		num_of_files = len(all_files)
 
-
+		start_parsing_files = datetime.now()
 		# Search through all decompiled files.
 		learned_list = [] # _list variables will store anything that needs to be loaded into a a table. We'll do them in bulk to make it much, much faster.
 		stations_groups = []
 		object_list = []
 		for file in all_files:
-			# Note: Starbound reads the extension of an object (such as .activeitem) to determine what it should search for. I should do the same to emulate what will be available in game.
-			self.filename = Path(file).name
-			read_data = self.read_json(str(file))
-			if read_data == "?":
-				logging.error("Could not read JSON file located at {}, skipping file.".format(str(file)))
-				continue
-
-			###################
-			## Create Object ##
-			###################
-			item_name = self.json_get("itemName", read_data, error_on_fail=False)
-			if item_name == "?": # This might happen if it is a .object file.
-				item_name = self.json_get("objectName", read_data, error_message="File {} has no itemName or objectName key. Cannot be indexed.".format(self.filename))
-			display_name = self.json_get("shortdescription", read_data, error_message="File {} has no shortdescription key.".format(self.filename))
-			category = self.json_get("category", read_data, error_message="File {} has no category key.".format(self.filename))
-			if item_name != "?" and category != "?" and display_name != "?":
-				object_list.append((item_name, display_name, category, 0, 0, "?", "?", from_mod))
-
-
-			##################
-			## Create Learn ##
-			##################
 			try:
-				learnedList = read_data["learnBlueprintsOnPickup"]
-				for learned in learnedList:
-					if learned: # I've seen some objects have no values within this field, so I need to check for that.
-						learned_list.append((item_name, learned, from_mod))
-			except KeyError: # This will trigger if there's nothing to be learned from this object.
-				pass
+				# Note: Starbound reads the extension of an object (such as .activeitem) to determine what it should search for. I should do the same to emulate what will be available in game.
+				self.filename = Path(file).name
+				read_data = self.read_json(str(file))
+				if read_data == "?":
+					logging.error("Could not read JSON file located at {}, skipping file.".format(str(file)))
+					continue
+
+				###################
+				## Create Object ##
+				###################
+				item_name = self.json_get("itemName", read_data, error_on_fail=False)
+				if item_name == "?": # This might happen if it is a .object file.
+					item_name = self.json_get("objectName", read_data, error_message="File {} has no itemName or objectName key. Cannot be indexed.".format(self.filename))
+				display_name = self.json_get("shortdescription", read_data, error_message="File {} has no shortdescription key.".format(self.filename))
+				category = self.json_get("category", read_data, error_message="File {} has no category key.".format(self.filename))
+				if item_name != "?" and category != "?" and display_name != "?":
+					object_list.append((item_name, display_name, category, 0, 0, "?", "?", from_mod))
 
 
-			#####################
-			## Crafting Groups ##
-			#####################
-			# NOTE: If a table doesn't have the "crafting" category tag, I will not be able to find it. This is to optimize the time it takes to scan objects, maybe I'll turn this off in the future if it's not too much of an increase.
-			cat = self.json_get("category", read_data, error_on_fail=False)
+				##################
+				## Create Learn ##
+				##################
+				try:
+					learnedList = read_data["learnBlueprintsOnPickup"]
+					for learned in learnedList:
+						if learned: # I've seen some objects have no values within this field, so I need to check for that.
+							learned_list.append((item_name, learned, from_mod))
+				except KeyError: # This will trigger if there's nothing to be learned from this object.
+					pass
 
-			if cat == "crafting":
-				group = self.json_get("recipeGroup", read_data, error_on_fail=False) # This seems to be an old method they changed from at a later date, but of course they didn't remove it all.
-				if group != "?":
-					stations_groups.append((group, item_name, from_mod))
 
-				else:
-					upgrade_stages = self.json_get("upgradeStages", read_data, error_on_fail=False) # Check if this object has upgrade stages. If so, this will take priority. Hopefully that's how the game does it.
-					if upgrade_stages != "?":
-						object_list.pop() # I believe that first object in upgrade_stages will always be a duplicate of whatever you find in the rest of the file, so I remove it here.
-						for obj in upgrade_stages:
+				#####################
+				## Crafting Groups ##
+				#####################
+				# NOTE: If a table doesn't have the "crafting" category tag, I will not be able to find it. This is to optimize the time it takes to scan objects, maybe I'll turn this off in the future if it's not too much of an increase.
+				cat = self.json_get("category", read_data, error_on_fail=False)
 
-							############################
-							## Create new object_list ##
-							############################
-							params = self.json_get("itemSpawnParameters", obj, error_on_fail=True) # TODO maybe replace this with an actual try/except so I can give more information.
-							if params != "?":
-								o_item_name = self.json_get("animationState", obj)
-								o_display_name = self.json_get("shortdescription", params)
-								# Validate the checked values. If they're ?, then inherit the original value.
-								if o_item_name == "?": o_item_name = item_name
-								if o_display_name == "?": o_display_name = display_name
-								if o_item_name != "?" and o_display_name != "?" and category != "?":
-									object_list.append((o_item_name, o_display_name, category, 0, 0, "?", "?", from_mod))
+				if cat == "crafting":
+					group = self.json_get("recipeGroup", read_data, error_on_fail=False) # This seems to be an old method they changed from at a later date, but of course they didn't remove it all.
+					if group != "?":
+						stations_groups.append((group, item_name, from_mod))
 
-								####################
-								## stations_group ##
-								####################
-								values = self.create_group_list(o_item_name, from_mod, obj, dir)
-								for entry in values:
-									if entry[0] != "?":
-										stations_groups.append(entry)
+					else:
+						upgrade_stages = self.json_get("upgradeStages", read_data, error_on_fail=False) # Check if this object has upgrade stages. If so, this will take priority. Hopefully that's how the game does it.
+						if upgrade_stages != "?":
+							object_list.pop() # I believe that first object in upgrade_stages will always be a duplicate of whatever you find in the rest of the file, so I remove it here.
+							for obj in upgrade_stages:
 
-							# Search for addonConfig
-							addonConfig = self.json_get("addonConfig", obj, error_on_fail=False)
-							if addonConfig != "?":
-								usesAddons = self.json_get("usesAddons", addonConfig, error_on_fail=True)
-
-								for addon in usesAddons:
-									a_item_name = self.json_get("name", addon)
-									addon_data = self.json_get("addonData", addon)
-									interact_data = self.json_get("interactData", addon_data)
-
-									###################
-									## Create Object ##
-									###################
-									panel = self.json_get("paneLayoutOverride", interact_data)
-									window = self.json_get("windowtitle", panel)
-									a_display_name = window["title"]
-									if a_item_name != "?" and a_display_name != "?" and category != "?":
-										object_list.append((a_item_name, a_display_name, category, 0, 0, "?", "?", from_mod))
+								############################
+								## Create new object_list ##
+								############################
+								params = self.json_get("itemSpawnParameters", obj, error_on_fail=True) # TODO maybe replace this with an actual try/except so I can give more information.
+								if params != "?":
+									o_item_name = self.json_get("animationState", obj)
+									o_display_name = self.json_get("shortdescription", params)
+									# Validate the checked values. If they're ?, then inherit the original value.
+									if o_item_name == "?": o_item_name = item_name
+									if o_display_name == "?": o_display_name = display_name
+									if o_item_name != "?" and o_display_name != "?" and category != "?":
+										object_list.append((o_item_name, o_display_name, category, 0, 0, "?", "?", from_mod))
 
 									####################
 									## stations_group ##
 									####################
-									filter = self.json_get("filter", interact_data)
-									for group in filter:
-										if group != "?":
-											stations_groups.append((group, a_item_name, from_mod))
+									values = self.create_group_list(o_item_name, from_mod, obj, dir)
+									for entry in values:
+										if entry[0] != "?":
+											stations_groups.append(entry)
 
-					else: # If it has no upgrade stages, check it as a normal object for groups
-						interact_data = self.json_get("interactData", read_data)
-						if interact_data != "?":
-							# Check for filter.
-							filter = self.json_get("filter", interact_data)
-							if filter != "?":
-								for group in filter:
-									stations_groups.append((group, item_name, from_mod))
-							else:
-								# Check config file
-								config_location = str(dir) + self.json_get("config", interact_data)
-								config = self.read_json(config_location)
-								if config != "?":
-									filter = self.json_get("filter", config)
+								# Search for addonConfig
+								addonConfig = self.json_get("addonConfig", obj, error_on_fail=False)
+								if addonConfig != "?":
+									usesAddons = self.json_get("usesAddons", addonConfig, error_on_fail=True)
+
+									for addon in usesAddons:
+										a_item_name = self.json_get("name", addon)
+										addon_data = self.json_get("addonData", addon)
+										interact_data = self.json_get("interactData", addon_data)
+
+										###################
+										## Create Object ##
+										###################
+										panel = self.json_get("paneLayoutOverride", interact_data)
+										window = self.json_get("windowtitle", panel)
+										a_display_name = window["title"]
+										if a_item_name != "?" and a_display_name != "?" and category != "?":
+											object_list.append((a_item_name, a_display_name, category, 0, 0, "?", "?", from_mod))
+
+										####################
+										## stations_group ##
+										####################
+										filter = self.json_get("filter", interact_data)
+										for group in filter:
+											if group != "?":
+												stations_groups.append((group, a_item_name, from_mod))
+
+						else: # If it has no upgrade stages, check it as a normal object for groups
+							interact_data = self.json_get("interactData", read_data)
+							if interact_data != "?":
+								# Check for filter.
+								filter = self.json_get("filter", interact_data)
+								if filter != "?":
 									for group in filter:
 										stations_groups.append((group, item_name, from_mod))
+								elif filter == "?":
+									# Check config file
+									config_location = str(dir) + self.json_get("config", interact_data)
+									config = self.read_json(config_location)
+									if config != "?":
+										filter = self.json_get("filter", config)
+										for group in filter:
+											stations_groups.append((group, item_name, from_mod))
+								elif filter == "config":
+									config_location = str(dir) + self.json_get("config", interact_data)
+									config = self.read_json(config_location)
+									if config != "?":
+										filter = self.json_get("filter", config)
+										for group in filter:
+											stations_groups.append((group, item_name, from_mod))
+			except Exception as ex:
+				logging.error("Encountered an unexpected error while trying to read file {}. Traceback:\n{}\n".format(Path(file).name, traceback.format_exc()))
 
+		end_parsing_files = datetime.now()
+		diff = end_parsing_files - start_parsing_files
+		logging.info("It took {} to read {} files, at a rate of {} per file".format(diff, num_of_files, diff / num_of_files))
 
+		timer_insert_main = timer()
+		timer_insert_main.t_in()
 		self.cursor.executemany("INSERT INTO objects VALUES(?, ?, ?, ?, ?, ?, ?, ?)", object_list)
 		self.cursor.executemany("INSERT INTO learn VALUES(?, ?, ?)", learned_list)
 		self.cursor.executemany("INSERT INTO stations_groups VALUES(?, ?, ?)", stations_groups)
-
+		diff = timer_insert_main.t_out()
+		insert_num = len(object_list) + len(learned_list) + len(stations_groups)
+		logging.info("It took {} to insert {} files into the database, for a rate of {} per insert".format(diff, insert_num, diff/insert_num))
 
 
 		#########################
@@ -363,62 +420,95 @@ class database():
 		inputs = []
 		outputs = []
 		for file in recipes:
-			read_data = self.read_json(str(file))
-			# generic = self.generic_object_data(read_data, from_mod, already_parsed=True)
-			duration = 0
-			name = "" # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
-
-			#################
-			## Get outputs ##
-			#################
 			try:
-				output_field = read_data["output"]
-				try:  # Output stores a dictionary
-					name = output_field["item"]
-					outputs.append((name, name, output_field["count"], from_mod))
-				except KeyError:  # Output stores an array of dictionaries
-					for i in output_field:
-						name += i["item "] # I'm not sure how this will look but hopefully this never happens please modders
-						outputs.append((name, i["count"]))
-					name = name[:-1]
-					logging.warning("File {} is using an array for its output instead of a single dictionary. You monster.".format(file))
-			except KeyError:
-				name = "?"
-				outputs.append((name, name, -1, from_mod))
-				logging.warning("Could not read output from file {}".format(Path(file).name))
+				read_data = self.read_json(str(file))
+				# generic = self.generic_object_data(read_data, from_mod, already_parsed=True)
+				duration = 0
+				name = "" # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
 
-			################
-			## Get inputs ##
-			################
-			try:
-				input_field = read_data["input"]
-				try:  # Input stores an array of dictionaries
-					for i in input_field:
-						inputs.append((name, i["item"], i["count"], from_mod))
-				except KeyError:  # Input stores a dictionary
-					inputs.append((name, input_field["item"], input_field["count"], from_mod))
-			except KeyError:
-				logging.warning("Could not read input from file {}".format(Path(file).name))
+				#################
+				## Get outputs ##
+				#################
+				try:
+					output_field = read_data["output"]
+					try:  # Output stores a dictionary
+						try:
+							name = output_field["item"]
+						except KeyError:
+							name = output_field["name"]
+						try:
+							count = output_field["count"]
+						except KeyError:
+							count = 1
+						outputs.append((name, name, count, from_mod))
+					except KeyError:  # Output stores an array of dictionaries
+						for i in output_field:
+							try:
+								name += i["item"] # I'm not sure how this will look but hopefully this never happens please modders
+							except KeyError:
+								name += output_field["name"]
+							try:
+								count = i["count"]
+							except KeyError:
+								count = 1
+							outputs.append((name, count))
+						name = name[:-1]
+						logging.warning("File {} is using an array for its output instead of a single dictionary. You monster.".format(file))
+				except KeyError:
+					name = "?"
+					outputs.append((name, name, -1, from_mod))
+					logging.warning("Could not read output from file {}".format(Path(file).name))
 
-			################
-			## Get groups ##
-			################
-			try:
-				for group in read_data["groups"]:
-					recipes_groups.append((group, name, from_mod))
-			except KeyError:
-				recipes_groups.append(("?", name, from_mod))
-				logging.warning("Could not read input from file {}".format(Path(file).name))
+				################
+				## Get inputs ##
+				################
+				try:
+					input_field = read_data["input"]
+					try:  # Input stores an array of dictionaries
+						for i in input_field:
+							try:
+								input_name = i["item"]
+							except KeyError:
+								input_name = i["name"]
+							try:
+								count = i["count"]
+							except KeyError:
+								count = 1
+							inputs.append((name, input_name, count, from_mod))
+					except KeyError:  # Input stores a dictionary
+						try:
+							input_name = input_field["item"]
+						except KeyError:
+							input_name = input_field["name"]
+						try:
+							count = input_field["count"]
+						except KeyError:
+							count = 1
+						inputs.append((name, input_name, count, from_mod))
+				except KeyError:
+					logging.warning("Could not read input from file {}".format(Path(file).name))
+
+				################
+				## Get groups ##
+				################
+				try:
+					for group in read_data["groups"]:
+						recipes_groups.append((group, name, from_mod))
+				except KeyError:
+					recipes_groups.append(("?", name, from_mod))
+					logging.warning("Could not read input from file {}".format(Path(file).name))
 
 
-			# Get duration
-			try:
-				duration = read_data["duration"]
-			except KeyError:
-				duration = 0.1 # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
-				logging.debug("Duration not specified in file {}".format(Path(file).name))
+				# Get duration
+				try:
+					duration = read_data["duration"]
+				except KeyError:
+					duration = 0.1 # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
+					# logging.debug("Duration not specified in file {}".format(Path(file).name))
 
-			collected_recipes.append((name, duration, from_mod))
+				collected_recipes.append((name, duration, from_mod))
+			except Exception as ex:
+				logging.error("Encountered an unexpected error while trying to read file {}. Traceback:\n{}".format(Path(file).name, traceback.format_exc()))
 
 		in_time = datetime.now()
 		self.cursor.executemany("INSERT INTO recipes VALUES(?, ?, ?)", collected_recipes)
@@ -433,16 +523,44 @@ class database():
 
 		self.connect.commit()
 
-	def remove_entries_of_mod(self, mod_name):
+	def remove_entries_of_mod(self, mod_name="", mod_checksum=""):
 		"""Removes all entries of this mod from all databases.
 		:param mod_name: ID of the mod you wish to remove.
+		:param mod_checksum: The checksum of the mod, if we don't have the name. This will be converted into the name using the modlist table.
 		"""
 		tables = ["recipes", "recipes_groups", "stations_groups", "output", "input", "objects", "learn", "modlist"] # The names of all tables in the database.
 
+		if mod_checksum:
+			mod_name = self.cursor.execute("SELECT from_mod FROM modlist WHERE checksum={}".format(mod_checksum))
+		logging.debug("Attempting to remove mod {} from database...".format(mod_name))
 		for table in tables:
 			expr = "DELETE FROM {} WHERE from_mod=?".format(table)
 			self.cursor.execute(expr, (mod_name,))
 			self.connect.commit()
+		logging.debug("Successfully removed {} from database".format(mod_name))
+
+	def clear_database(self):
+		"""Delete the database lmao"""
+		db_file = self.data_folder + "/recipe_test.foxdb"
+		if path.isfile(db_file):
+			self.connect.close()
+			remove(db_file)
+
+			# Recreate DB and reconnect SQL to it
+			db_file = self.data_folder + "/database.foxdb"  # Location of the database file on the PC.
+			b_make_db = False  # If we detect the file missing, or detect any missing tables, create them.
+			if not path.isfile(db_file):
+				b_make_db = True
+
+			self.connect = sqlite3.connect(db_file)  # Open the SQL database on the PC.
+			self.cursor = self.connect.cursor()  # I don't quite understand how the cursor works, but it's the main thing used when interacting with the database.
+			self.connect.create_function("REGEXP", 2, regexp)
+
+			# If the file was detected, check if all tables are present.
+			# TODO - Add this. I couldn't find a way to get the number of tables easily, so I'll do it later.
+			# self.db_tables = ["recipes", "objects", "learn", "id_convert"]
+			if b_make_db:
+				self.create_tables()
 
 
 
@@ -470,7 +588,6 @@ class database():
 			expr += " ORDER BY {}".format(order)
 
 		self.cursor.execute(expr)
-
 		return self.cursor.fetchall()
 
 
@@ -503,12 +620,13 @@ class database():
 		:param group: (str) The name of the group you wish to search for
 		:return: Array of all IDs capable of crafting this group.
 		"""
-		result = self.search("groups", column="grouping", where_value=group, regex=True, return_column="station")
+		result = self.search("groups", where_value=group, return_column="station")
 		try:
 			return result[0]
 		except IndexError:
 			logging.warning("Search for the group {} in groups returned nothing".format(group))
 			return "?"
+
 
 	def remove_colour_tags(self, text):
 		type_of_var = type(text)
@@ -582,7 +700,8 @@ class database():
 				)
 			)""".format(bench))
 			semi_set = []
-			for row in self.cursor.fetchall():
+			res = self.cursor.fetchall()
+			for row in res:
 				semi_set.append(row[0])
 			all_ids = set_merge(all_ids, semi_set)
 			if not all_ids: return "?"
@@ -600,7 +719,8 @@ class database():
 
 	def get_recipe_information(self, recipe_ids):
 		"""
-		This will search through all recipe IDs provided, and return a 2D array containing all relevant information.
+		This will search through all recipe IDs provided, and return a 3D array containing all relevant information.
+		This is to be used when displaying a recipe's information, and can be provided the result from search_recipe
 		:param recipe_ids: (array of strings) The ID of a recipe. This must be an exact name.
 		:return: A 3D array with 6 cells per entry. The following array is for a single given recipe_id:
 		[
@@ -625,35 +745,53 @@ class database():
 			recipe_mod = recipes_db[0][2]
 			group1 = [recipe_id, recipe_duration, recipe_mod]
 
+			##################
+			## Learned From ##
+			##################
 			learned_from = []
 			self.cursor.execute("SELECT display_name FROM objects WHERE item_name IN (SELECT from_object FROM learn WHERE recipe='{}')".format(recipe_id))
 			for object in self.cursor.fetchall():
 				learned_from.append(object[0])
 
+			###################
+			## Recipe Groups ##
+			###################
 			recipe_groups = []
 			self.cursor.execute("SELECT grouping FROM recipes_groups WHERE recipe_name='{}'".format(recipe_id))
-			for group in self.cursor.fetchall():
+			raw_recipe_groups = self.cursor.fetchall()
+			print(raw_recipe_groups)
+			for group in raw_recipe_groups:
 				recipe_groups.append(group[0])
 
+			############
+			## Output ##
+			############
 			recipe_outputs = []
 			self.cursor.execute("SELECT * FROM output WHERE recipe_name='{}'".format(recipe_id))
 			for output in self.cursor.fetchall():
 				recipe_outputs.append(output[1])
 				recipe_outputs.append(output[2])
 
+			###########
+			## Input ##
+			###########
 			recipe_inputs = []
 			self.cursor.execute("SELECT * FROM input WHERE recipe_name='{}'".format(recipe_id))
 			for input in self.cursor.fetchall():
 				recipe_inputs.append(input[1])
 				recipe_inputs.append(input[2])
 
+			################
+			## Created At ##
+			################
 			recipe_tables = []
 			self.cursor.execute("""SELECT display_name FROM objects WHERE item_name IN (
 				SELECT station FROM stations_groups WHERE grouping IN (
 					SELECT grouping FROM recipes_groups WHERE recipe_name='{}'))""".format(recipe_id))
 			# This last nested SELECT is needless. I already have stored all of the grouping values in recipe_groups. But SQLite3 has forced my hand.
-			# TODO: Come back and figure out why SQLite hates me.
-			for table in self.cursor.fetchall():
+			# TODO: Come back and figure out why SQLite hates me. (I probably won't because it works fine)
+			all_tables = self.cursor.fetchall()
+			for table in all_tables:
 				recipe_tables.append(table[0])
 
 			sub_array.append(group1)
@@ -665,6 +803,89 @@ class database():
 			master_array.append(sub_array)
 
 		return master_array
+
+
+	def extract_recipe_string(self, recipe_data):
+		"""Create a string about all contained recipes.
+		Should be provided with the 3D array output by get_recipe_string
+		:param recipe_data: Should be provided with a 3D array output by get_recipe_information"""
+
+		for recipe in recipe_data:
+			item_id = recipe[0][0] # The ID of the output item.
+			duration = recipe[0][1] # How long it takes to craft
+			from_mod = recipe[0][2] # Which mod this recipe came from
+
+			# Which objects you can pick up to learn this recipe.
+			learned_from = ""
+			list_size = len(recipe[1])
+			for index, learned in enumerate(recipe[1]):
+				if index == 0:
+					learned_from = learned
+				elif index == (list_size - 1):  # Last entry of the list
+					learned_from += " and {}".format(learned)
+				else:
+					learned_from += ", {}".format(learned)
+
+			# What this recipe creates
+			output = ""
+			recipe_name = ""
+			num_of_outputs = int(len(recipe[2]) / 2)  # This is divided by two because there will always be 2 entries per output, count and item
+			for index in range(num_of_outputs):
+				list_pos = index * 2
+				object_name = d.remove_colour_tags(d.convert_id(id=recipe[2][list_pos]))
+				object_count = recipe[2][list_pos + 1]
+
+				if index == 0:
+					recipe_name = "{}".format(object_name)
+					output = "{} (x{})".format(object_name, object_count)
+				else:
+					output += ", {} (x{})".format(object_name, object_count)
+					recipe_name += "{}".format(object_name)  # Hopefully this never happens.
+
+			inputval = ""
+			num_of_inputs = int(len(recipe[3]) / 2)  # This is divided by two because there will always be 2 entries per input, count and item
+			for index in range(num_of_inputs):
+				list_pos = index * 2
+				object_name = d.remove_colour_tags(d.convert_id(id=recipe[3][list_pos]))
+				object_count = recipe[3][list_pos + 1]
+
+				if index == 0:
+					inputval = "{} (x{})".format(object_name, object_count)
+				else:
+					inputval += ", {} (x{})".format(object_name, object_count)
+
+			benches = ""
+			list_size = len(recipe[4])
+			for index, bench_name in enumerate(recipe[4]):
+				bench_name_clean = d.remove_colour_tags(bench_name)
+				if index == 0:
+					benches = "{}".format(bench_name_clean)
+				elif index == (list_size - 1):
+					benches += " and {}".format(bench_name_clean)
+				else:
+					benches += ", {}".format(bench_name_clean)
+
+			groups = ""
+			list_size = len(recipe[5])
+			for index, group_name in enumerate(recipe[5]):
+				if index == 0:
+					groups = "{}".format(group_name)
+				else:
+					groups += ", {}".format(group_name)
+
+			print_value = """Recipe name: {}
+							Crafted at: {}
+							Crafted with: {}
+							Creates: {}
+							Learned from: {}
+							This recipe takes {}s to craft.
+
+							Meta info:
+							Recipe groups: {}
+							Created Item ID: {}
+							From Mod: {}
+							""".format(recipe_name, benches, inputval, output, learned_from, duration, groups, item_id, from_mod)
+
 
 
 
@@ -698,7 +919,7 @@ class database():
 				if config != "?":
 					filter = self.json_get("filter", config)
 					for group in filter:
-						all_groups.append(group, name, from_mod)
+						all_groups.append((group, name, from_mod))
 				else:
 					logging.warning("Cannot read config file at {}".format(config_location))
 					all_groups.append(("?", name, from_mod))
@@ -714,44 +935,29 @@ class database():
 		"""
 		with open(file_path) as file:
 			try:
-				data = json.load(file)
+				data = json.load(file, strict=False)
 				return data
-			except json.decoder.JSONDecodeError as ex:
+			except json.decoder.JSONDecodeError:
 				#logging.debug("Erroneous JSON code in {}, attempting to fix...".format(Path(file_path).name))
-
 				file.seek(0)  # We've already read the file once, so reset the seek.
 				new_file = file.read()  # Convert the file to a string so we can run functions on it.
 
 				# Search for inline comments.
-				while True:  # Will automatically break out if it find no comments.
-					comment_start = new_file.find("//") # TODO - I've seen // be used in actual values (e.g "name": "//duck". I should change this to regex so I can account for this in the future.
-					if comment_start == -1:
-						break
-					else:
-						linebreak = new_file.find("\n", comment_start)
-						comment = new_file[comment_start:linebreak]
-						new_file = new_file.replace(comment, "")  # Okay I really should be using RegEx here, but it's been years since I touched it an I can't be bothered to learn it again right now.
+				new_file = re.sub(self.re_line_comment, '', new_file)
 
 				# Search for block comments.
-				while True:
-					match = re.search(self.re_block_comment, new_file)
-					if match:
-						comment_start = match.start(0)
-						comment_end = match.end(0)
-						comment = new_file[comment_start:comment_end]
-						new_file = new_file.replace(comment, "")
-					else:
-						break
+				new_file = re.sub(self.re_block_comment, '', new_file)
 
 				# Try to read the string again after all comments have been removed.
 				try:
-					data = json.loads(new_file)  # Changed to loads with an s as we're reading a string, not a file.
-					#logging.debug("Successfully removed comments!")
+					data = json.loads(new_file, strict=False)  # Changed to loads with an s as we're reading a string, not a file.
 					return data
 				except Exception as ex:
-					logging.warning("Cannot load file JSON file {}, error {}.".format(Path(file_name).name, ex))
+					logging.warning("Cannot load file JSON file {}, error {}.".format(Path(file_path).name, ex))
 					data = None
 					return data
+			except Exception as ex:
+				logging.error("Unknown error happened while attempting to decode {}\n{}".format(Path(file_path).name, ex))
 
 	def reset(self):
 		"""Defines and or resets all of the self. variables I will be using."""
@@ -761,13 +967,25 @@ class database():
 		self.undetected_checksums = set({})  # Any checksums that were not found. These will be mods we'll need to search for in case they have been updated.
 		self.found_mods = set({})  # These are all of the mod checksums from the files that we DO recognize.
 		self.indexed_checksums = []  # All checksums in modlist.fox
-		self.indexed_names = []  # All mod names in modlist.fox. The index in this list should relate to the checksum of self.indexed_checksums
+		self.indexed_friendly_names = []  # All mod names in modlist.fox. The index in this list should relate to the checksum of self.indexed_checksums
 		self.lost_mods = []  # A list of the names of all mods that could not be found. We'll use this name to remove any entries that were added by this mod.
 
 		self.b_new_mods = False  # This will evaluate if there's a new mod detected. New mods should be pulled from self.mod_files
 		self.b_lost_mods = False  # Whether there are mods that used to be on here, but are no longer detected.
 
 		self.filename = "" # The name of the file that we're currently parsing.
+
+	def remove_staged(self, checksum):
+		"""Removes the folder and all files of a staged checksum. Also removes the checksum from the database.
+		:param checksum: The checksum corresponding to the name of the folder."""
+		folder = self.unpack_location + "/{}".format(checksum)
+		if Path(folder).exists():
+			rmtree(folder)
+			expr = "DELETE FROM unpacked_files WHERE checksum={}".format(checksum)
+			self.cursor.execute(expr)
+			self.connect.commit()
+		else:
+			logging.warning("Provided checksum {} does not exist, cannot remove from files.\nTrackback:\n{}".format(folder, traceback.format_exc()))
 
 	def create_tables(self):
 		### CREATE TABLES ###
@@ -842,6 +1060,11 @@ class database():
 			version TEXT
 			)""")
 
+		# Staged unpack files. These are files that have been unpacked, but **not** parsed for data yet. The checksum is the name of their folder.
+		self.cursor.execute("""CREATE TABLE unpacked_files (
+			checksum TEXT
+			)""")
+
 		self.cursor.execute("commit")
 
 	def json_get(self, key, data, error_on_fail=True, error_message=""):
@@ -860,8 +1083,14 @@ class database():
 				if error_message:
 					logging.warning(error_message)
 				else:
-					logging.warning("File {} has no key {}.".format(self.filename, key))
+					logging.info("File {} has no key {}.".format(self.filename, key))
+		except TypeError:
+			val = "config"
+			if error_on_fail:
+				logging.info("File {} seems to be interactData for a config.".format(self.filename))
+
 		return val
+
 
 
 def regexp(expr, item):
@@ -887,3 +1116,6 @@ if __name__ == "__main__":
 	logging.basicConfig(filename='{}/log.txt'.format(program_folder), filemode="w", level=logging.DEBUG, format="[%(asctime)s] %(levelname)s: %(message)s", datefmt="%m/%d/%Y %I:%M:%S %p")
 	d = Database("E:/Steam/steamapps")
 	d.index_mods()
+
+
+# woo line 1000 (right now). arix is gayrix
