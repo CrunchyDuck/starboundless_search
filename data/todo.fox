@@ -13,6 +13,8 @@ TODO list:
   Allow the user to omit a world, maybe by typing -(words to omit) or -word
   Test adding poorly formatted/erroneous JSON files (Missing fields, completely broken stuff, etc.)
   Change the "where_value" to allow for command inputs (E.G telling it that this should be the start of a set of brackets)
+  Switch file parsing to use self.filename
+  Look into scanning .patch files for relevant information (Not sure how big this will be to do.
   Allow the user to search for recipes based on what object it's learned from.
   Add in more details to the metadata about unpack time/parsing time
   Update my staged DB and my modlist DB to include information about unpack/index/steamID
@@ -28,6 +30,7 @@ TODO list:
   Update the search function to allow for multiple where clauses.
   Line 629 (Removing comments from .json files): I've seen // be used in actual values (e.g "name": "//duck". I should change this to regex so I can account for this in the future.
   Figure out why "pleacekeeper1" isn't being indexed.
+  Consider combining the function of search_recipe, get_recipe_information, and extract_recipe_string
   The metadata file is optional, so I need to account for that not being there.
 
   Remove logging.debug from recipe parsing for "duration". I know the default value and many don't have this field.

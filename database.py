@@ -4,6 +4,7 @@ try:
 	from subprocess import run # Used to unpack the .pak files.
 	from os import (
 		mkdir as makedir, # I renamed this because I was using "makedirs" and switched to this.
+		makedirs,
 		path,
 		remove
 	)
@@ -27,7 +28,6 @@ def Database(steamapps_directory):
 	object.mods_dir = Path(str(object.steam_dir) + "/workshop/content/211820")  # Folder for steam mods.
 	object.starbound_dir = Path(str(object.steam_dir) + "/common/Starbound")  # Starbound folder
 	object.starbound_mods_dir = Path(str(object.starbound_dir) + "/mods")  # Location of the mods folder in the starbound folder
-	object.unpack_location = "{}/unpack".format(object.program_folder)
 	return object
 
 
@@ -39,19 +39,103 @@ class timer():
 		self.time_out = datetime.now()
 		return self.time_out - self.time_in
 
+class json_reader():
+	"""This object is for handling parsing of different types of files into data for the relevant database."""
+	def recipe(self, file):
+		filename = Path(file).name
+		read_data = self.read_json(str(file))
+		# generic = self.generic_object_data(read_data, from_mod, already_parsed=True)
+		duration = 0
+		name = ""  # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
+
+		################
+		## Get output ##
+		################
+		try:
+			output_field = read_data["output"]
+			try:  # Output stores a dictionary
+				# Output_field can be under two different names.
+				try:
+					name = output_field["item"]
+				except KeyError:
+					name = output_field["name"]
+				# Count can be omitted, and it is assumed to be "1" (Thanks to Sayter for verifying this)
+				try:
+					count = output_field["count"]
+				except KeyError:
+					count = 1
+				outputs.append((name, name, count, from_mod))
+			except KeyError:  # Output stores an array of dictionaries
+				logging.error("File {} seems to be storing its output incorrectly.".format(filename))
+				raise KeyError("Output in file {} was incorrectly defined.".format(filename))
+		except KeyError:
+			logging.warning("Could not read output from file {}".format(filename))
+			raise KeyError("Could not read output from file {}".format(filename))
+
+		################
+		## Get inputs ##
+		################
+		try:
+			input_field = read_data["input"]
+			try:  # Input stores an array of dictionaries
+				for i in input_field:
+					try:
+						input_name = i["item"]
+					except KeyError:
+						input_name = i["name"]
+					try:
+						count = i["count"]
+					except KeyError:
+						count = 1
+					inputs.append((name, input_name, count, from_mod))
+			except KeyError:  # Input stores a dictionary
+				try:
+					input_name = input_field["item"]
+				except KeyError:
+					input_name = input_field["name"]
+				try:
+					count = input_field["count"]
+				except KeyError:
+					count = 1
+				inputs.append((name, input_name, count, from_mod))
+		except KeyError:
+			logging.warning("Could not read input from file {}".format(filename))
+			raise KeyError("Could not read input from file {}".format(filename))
+
+		################
+		## Get groups ##
+		################
+		try:
+			for group in read_data["groups"]:
+				recipes_groups.append((group, name, from_mod))
+		except KeyError:
+			# I believe that recipes *can* be defined without a recipe group, they just won't be able to be crafted anywhere. Therefore I will index the recipe.
+			recipes_groups.append(("?", name, from_mod))
+			logging.error("Could not read recipe groups from file {}".format(filename))
+
+		# Get duration
+		try:
+			duration = read_data["duration"]
+		except KeyError:
+			duration = 0.1  # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
+		# logging.debug("Duration not specified in file {}".format(Path(file).name))
+
+		collected_recipes.append((name, duration, from_mod))
 
 class database():
 
 	def __init__(self):
-		self.program_folder = str(Path.cwd().parent) # The location of this program's master folder.
+		self.program_folder = str(Path.cwd()) # The location of this program's master folder.
 		self.data_folder = "{}/data".format(self.program_folder)
+		self.unpack_location = "{}/data/unpack".format(self.program_folder)  # Location where files will be unpacked to (string)
+		makedirs(self.unpack_location, exist_ok=True)
 
 		# Set when the object is called.
 		self.steam_dir = "" # This will be used to search for starbound's files. (Path)
 		self.mods_dir = ""  # Folder for steam mods. (Path)
 		self.starbound_dir = ""  # Starbound folder (Path)
 		self.starbound_mods_dir = ""  # Location of the mods folder in the starbound folder (Path)
-		self.unpack_location = "" # Location where files will be unpacked to (string)
+
 
 
 		# Database
@@ -69,6 +153,7 @@ class database():
 		# self.db_tables = ["recipes", "objects", "learn", "id_convert"]
 		if b_make_db:
 			self.create_tables()
+		self.reader = json_reader() # This is used to read unpacked files.
 
 		self.re_line_comment = re.compile(r'//.*') # This can find all line comments in JSON (//Text after this). TODO: I need to name sure this DOESN'T delete comments within keys/values. We'll have issues if it does.
 		self.re_block_comment = re.compile(r'(/\*)(.|\n)+?(\*/)') # This is used to search a JSON file for block comments.
@@ -76,6 +161,10 @@ class database():
 
 		# Declares many more variables that may need to be reset at times.
 		self.reset()
+
+	def testdef(self):
+		def testdef2():
+			print("yaay")
 
 
 	# Process for updating the database:
@@ -421,92 +510,8 @@ class database():
 		outputs = []
 		for file in recipes:
 			try:
-				read_data = self.read_json(str(file))
-				# generic = self.generic_object_data(read_data, from_mod, already_parsed=True)
-				duration = 0
-				name = "" # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
-
-				#################
-				## Get outputs ##
-				#################
-				try:
-					output_field = read_data["output"]
-					try:  # Output stores a dictionary
-						try:
-							name = output_field["item"]
-						except KeyError:
-							name = output_field["name"]
-						try:
-							count = output_field["count"]
-						except KeyError:
-							count = 1
-						outputs.append((name, name, count, from_mod))
-					except KeyError:  # Output stores an array of dictionaries
-						for i in output_field:
-							try:
-								name += i["item"] # I'm not sure how this will look but hopefully this never happens please modders
-							except KeyError:
-								name += output_field["name"]
-							try:
-								count = i["count"]
-							except KeyError:
-								count = 1
-							outputs.append((name, count))
-						name = name[:-1]
-						logging.warning("File {} is using an array for its output instead of a single dictionary. You monster.".format(file))
-				except KeyError:
-					name = "?"
-					outputs.append((name, name, -1, from_mod))
-					logging.warning("Could not read output from file {}".format(Path(file).name))
-
-				################
-				## Get inputs ##
-				################
-				try:
-					input_field = read_data["input"]
-					try:  # Input stores an array of dictionaries
-						for i in input_field:
-							try:
-								input_name = i["item"]
-							except KeyError:
-								input_name = i["name"]
-							try:
-								count = i["count"]
-							except KeyError:
-								count = 1
-							inputs.append((name, input_name, count, from_mod))
-					except KeyError:  # Input stores a dictionary
-						try:
-							input_name = input_field["item"]
-						except KeyError:
-							input_name = input_field["name"]
-						try:
-							count = input_field["count"]
-						except KeyError:
-							count = 1
-						inputs.append((name, input_name, count, from_mod))
-				except KeyError:
-					logging.warning("Could not read input from file {}".format(Path(file).name))
-
-				################
-				## Get groups ##
-				################
-				try:
-					for group in read_data["groups"]:
-						recipes_groups.append((group, name, from_mod))
-				except KeyError:
-					recipes_groups.append(("?", name, from_mod))
-					logging.warning("Could not read input from file {}".format(Path(file).name))
-
-
-				# Get duration
-				try:
-					duration = read_data["duration"]
-				except KeyError:
-					duration = 0.1 # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
-					# logging.debug("Duration not specified in file {}".format(Path(file).name))
-
-				collected_recipes.append((name, duration, from_mod))
+				self.filename = Path(file).name
+				self.reader.recipe(file)
 			except Exception as ex:
 				logging.error("Encountered an unexpected error while trying to read file {}. Traceback:\n{}".format(Path(file).name, traceback.format_exc()))
 
@@ -615,19 +620,6 @@ class database():
 			return all_results
 
 
-	def search_groups(self, group):
-		"""Search the 'groups' database for a group, and return all tables that can craft this group.
-		:param group: (str) The name of the group you wish to search for
-		:return: Array of all IDs capable of crafting this group.
-		"""
-		result = self.search("groups", where_value=group, return_column="station")
-		try:
-			return result[0]
-		except IndexError:
-			logging.warning("Search for the group {} in groups returned nothing".format(group))
-			return "?"
-
-
 	def remove_colour_tags(self, text):
 		type_of_var = type(text)
 		if type_of_var == str:
@@ -641,6 +633,7 @@ class database():
 			logging.warning("remove_colour_tags was called with a value that is not a string or a list. Value: {}".format(text))
 
 
+	# Recipe junk
 	def search_recipe(self, output, input, duration, bench, from_mod):
 		"""
 		Search for a set of recipes that contains ALL of the input data. If a field is left blank, it is not searched for.
@@ -649,8 +642,8 @@ class database():
 		:param duration: (float) The time it takes for the recipe to craft.
 		:param bench: (str) The display_name of the bench that this recipe can be crafted at.
 		:param from_mod: (str) The friendly_name of the mod a recipe comes from
-		:return: (set) Any recipes that match ALL given fields.
-		If sokme data could not be parsed: (str) "?"
+		:return: (set) The ID of any recipes that match ALL given fields.
+		If some data could not be parsed: (str) "?"
 		"""
 		def set_merge(master_set, array):
 			array = set(array)
@@ -665,7 +658,7 @@ class database():
 		# Too bad!
 		# What I'm doing is running a SQL search for each provided field, then comparing the intersection of all of these sets to figure out which recipes are valid candidates.
 		if input:
-			self.cursor.execute("SELECT recipe_name FROM input WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP '{}')".format(input))
+			self.cursor.execute("SELECT recipe_name FROM input WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP (?))", (input,))
 			semi_set = []
 			for row in self.cursor.fetchall():
 				semi_set.append(row[0])
@@ -673,7 +666,7 @@ class database():
 			if not all_ids: return "?"
 
 		if output:
-			self.cursor.execute("SELECT recipe_name FROM output WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP '{}')".format(output))
+			self.cursor.execute("SELECT recipe_name FROM output WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP (?))", (output,))
 			semi_set = []
 			for row in self.cursor.fetchall():
 				semi_set.append(row[0])
@@ -683,7 +676,7 @@ class database():
 		if duration:
 			# TODO: I need to find a way to allow for comparisons of duration (And of quantity of input/output)
 			try:
-				self.cursor.execute("SELECT name FROM recipes WHERE duration={}".format(duration))
+				self.cursor.execute("SELECT name FROM recipes WHERE duration=(?)", (duration,))
 			except sqlite3.OperationalError:
 				logging.error("Failed to search for given duration in search_recipe. Duration given: {}".format(duration))
 				return "?"
@@ -696,9 +689,9 @@ class database():
 		if bench:
 			self.cursor.execute("""SELECT recipe_name FROM recipes_groups WHERE grouping IN (
 				SELECT grouping FROM stations_groups WHERE station IN (
-					SELECT item_name FROM objects WHERE display_name REGEXP '{}'
+					SELECT item_name FROM objects WHERE display_name REGEXP (?)
 				)
-			)""".format(bench))
+			)""", (bench,))
 			semi_set = []
 			res = self.cursor.fetchall()
 			for row in res:
@@ -707,7 +700,7 @@ class database():
 			if not all_ids: return "?"
 
 		if from_mod:
-			self.cursor.execute("SELECT name FROM recipes WHERE from_mod IN (SELECT from_mod FROM modlist WHERE friendly_name REGEXP '{}')".format(from_mod))
+			self.cursor.execute("SELECT name FROM recipes WHERE from_mod IN (SELECT from_mod FROM modlist WHERE friendly_name REGEXP (?))", (from_mod,))
 			semi_set = []
 			for row in self.cursor.fetchall():
 				semi_set.append(row[0])
@@ -716,6 +709,14 @@ class database():
 
 		return all_ids
 
+	def return_recipes_data(self, recipe_ids):
+		"""
+		Takes in an array of recipe ids and processes them into strings of data to display
+		"""
+		if recipe_ids != "?":
+			return self.extract_recipe_string(self.get_recipe_information(recipe_ids))
+		else:
+			return
 
 	def get_recipe_information(self, recipe_ids):
 		"""
@@ -739,8 +740,7 @@ class database():
 
 			self.cursor.execute("SELECT * FROM recipes WHERE name='{}'".format(recipe_id))
 			recipes_db = self.cursor.fetchall()
-			if not recipes_db:
-				return "No Recipes"
+
 			recipe_duration = recipes_db[0][1]
 			recipe_mod = recipes_db[0][2]
 			group1 = [recipe_id, recipe_duration, recipe_mod]
@@ -759,7 +759,6 @@ class database():
 			recipe_groups = []
 			self.cursor.execute("SELECT grouping FROM recipes_groups WHERE recipe_name='{}'".format(recipe_id))
 			raw_recipe_groups = self.cursor.fetchall()
-			print(raw_recipe_groups)
 			for group in raw_recipe_groups:
 				recipe_groups.append(group[0])
 
@@ -804,12 +803,12 @@ class database():
 
 		return master_array
 
-
 	def extract_recipe_string(self, recipe_data):
 		"""Create a string about all contained recipes.
 		Should be provided with the 3D array output by get_recipe_string
 		:param recipe_data: Should be provided with a 3D array output by get_recipe_information"""
 
+		print_values = []
 		for recipe in recipe_data:
 			item_id = recipe[0][0] # The ID of the output item.
 			duration = recipe[0][1] # How long it takes to craft
@@ -832,7 +831,7 @@ class database():
 			num_of_outputs = int(len(recipe[2]) / 2)  # This is divided by two because there will always be 2 entries per output, count and item
 			for index in range(num_of_outputs):
 				list_pos = index * 2
-				object_name = d.remove_colour_tags(d.convert_id(id=recipe[2][list_pos]))
+				object_name = self.remove_colour_tags(self.convert_id(id=recipe[2][list_pos]))
 				object_count = recipe[2][list_pos + 1]
 
 				if index == 0:
@@ -842,11 +841,12 @@ class database():
 					output += ", {} (x{})".format(object_name, object_count)
 					recipe_name += "{}".format(object_name)  # Hopefully this never happens.
 
+			# What items are required by this recipe
 			inputval = ""
 			num_of_inputs = int(len(recipe[3]) / 2)  # This is divided by two because there will always be 2 entries per input, count and item
 			for index in range(num_of_inputs):
 				list_pos = index * 2
-				object_name = d.remove_colour_tags(d.convert_id(id=recipe[3][list_pos]))
+				object_name = self.remove_colour_tags(self.convert_id(id=recipe[3][list_pos]))
 				object_count = recipe[3][list_pos + 1]
 
 				if index == 0:
@@ -854,10 +854,11 @@ class database():
 				else:
 					inputval += ", {} (x{})".format(object_name, object_count)
 
+			# Any benches this crafting recipe can be found at.
 			benches = ""
-			list_size = len(recipe[4])
+			list_size = len(recipe[4]) # Used to check what position in the list of benches we're in, so we can change the verbal structure of the sentence.
 			for index, bench_name in enumerate(recipe[4]):
-				bench_name_clean = d.remove_colour_tags(bench_name)
+				bench_name_clean = self.remove_colour_tags(bench_name)
 				if index == 0:
 					benches = "{}".format(bench_name_clean)
 				elif index == (list_size - 1):
@@ -865,6 +866,7 @@ class database():
 				else:
 					benches += ", {}".format(bench_name_clean)
 
+			# The crafting groups that this recipe is available in.
 			groups = ""
 			list_size = len(recipe[5])
 			for index, group_name in enumerate(recipe[5]):
@@ -874,17 +876,20 @@ class database():
 					groups += ", {}".format(group_name)
 
 			print_value = """Recipe name: {}
-							Crafted at: {}
-							Crafted with: {}
-							Creates: {}
-							Learned from: {}
-							This recipe takes {}s to craft.
+	Crafted at: {}
+	Crafted with: {}
+	Creates: {}
+	Learned from: {}
+	This recipe takes {}s to craft.
+	
+	Meta info:
+	Recipe groups: {}
+	Item ID: {}
+	From Mod: {}\n\n""".format(recipe_name, benches, inputval, output, learned_from, duration, groups, item_id, from_mod)
+			print_values.append(print_value)
 
-							Meta info:
-							Recipe groups: {}
-							Created Item ID: {}
-							From Mod: {}
-							""".format(recipe_name, benches, inputval, output, learned_from, duration, groups, item_id, from_mod)
+		return print_values
+
 
 
 
