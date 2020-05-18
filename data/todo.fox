@@ -1,0 +1,42 @@
+Current project goal:
+  Figure out how to handle upgradeable crafting tables. They're cruel.
+  
+  
+  
+TODO list:
+  Make individual diagrams for each type of file I'm parsing, to give a better idea on what databases related to what objects.
+  Allow the user to order the results of a search by something (E.G alphabetical, by mod...)
+  Things to consider indexing for objects: npcToy, colonyTags, in-world sprite
+  Upgradeable objects are *very* flaky for me work with, so it's almost a certainty that I'll have an error in how I'm handling them. For now I will just do what will make it work. E.G The first "level" of any of these always seems to be the same as the first defined object. Therefore, I will overwrite the first object with the first level.
+  Consumables: Figure out how effects work so I can index them. - Effects are stored in .statuseffect files.
+  Tell people that if they find any critical errors in the .log file, to send me the file, since these are normally things I left in to test.
+  Rename ALL instances of "input" - It currently overwrite the namespace of "input()" which gets user input lmao
+  Figure out a way to warn users of just how god damn slow unpacking files is going to be.
+  Allow the user to search for NOT a word, maybe by typing -(words to omit) or -word
+  Test adding poorly formatted/erroneous JSON files (Missing fields, completely broken stuff, etc.)
+  Look into scanning .patch files for relevant information (Not sure how big this will be to do.
+  Allow the user to search for recipes based on what object it's learned from.
+  Add in more details to the metadata about unpack time/parsing time
+  Update my staged DB and my modlist DB to include information about unpack/index/steamID
+  Finish making "object" search mode
+  Implement more benchmarking things - Telling the user exactly how long everything took, where all that time went, etc.
+  Add optional case sensitivity to searches.
+  Ensure that any time I search for RegEx values, I catch errors for poorly created values.
+  Update the search function to allow for multiple "where" clauses for one field.
+  Figure out why "pleacekeeper1" isn't being indexed.
+  Consider combining the function of search_recipe, get_recipe_information, and extract_recipe_string
+  The metadata file is optional, so I need to account for that not being there.
+  Test if an input can store a dictionary instead of an array of dictionaries. For now I will assume it cannot.
+
+  Change recipe database to expose input/output values into their own databases. This is to allow me to search for things like "less than 10 tungsten"
+  
+  For now I'm only going to allow for the user to specify a single input/output/etc for recipes, but I think it could certainly be possible to allow for multiple quantities and the like at a later date.
+  Add colour formatting to the search function.
+  Maybe look into the rotting script for consumables for more data.
+  
+  
+  Maybe I could add in "developer search" mode, that reverses the search to allow for searching IDs instead of display_names
+  
+  Toy around with generating a checksum for a file/folder structure, so that when we come to updating a mod, we can just create a checksum to check if there was a change. (This might be a lot of work for major file size increase and minimal performance increase)
+  
+  Idea for another part of the program: Make a "mod" that creates another mod, that will add all craftables to the player's pockets.
