@@ -30,6 +30,22 @@ def Database(steamapps_directory):
 	object.starbound_mods_dir = Path(str(object.starbound_dir) + "/mods")  # Location of the mods folder in the starbound folder
 	return object
 
+def regexp(expr, item):
+	reg = re.compile(expr, re.I) # This will make ALL searches case insensitive. Too bad!
+	return reg.search(item) is not None
+
+def generate_checksum(file_path):
+	#logging.debug("Generating checksum for file located at {}...".format(file_path))
+	hash_md5 = md5()
+	with open(file_path, "rb") as f:
+		for chunk in iter(lambda: f.read(4096), b""):
+			hash_md5.update(chunk)
+	checksum = hash_md5.hexdigest()
+
+	return checksum
+
+
+
 
 class timer():
 	"""Very basic object that is used to track how much time something took."""
@@ -39,95 +55,13 @@ class timer():
 		self.time_out = datetime.now()
 		return self.time_out - self.time_in
 
-class json_reader():
-	"""This object is for handling parsing of different types of files into data for the relevant database."""
-	def recipe(self, file):
-		filename = Path(file).name
-		read_data = self.read_json(str(file))
-		# generic = self.generic_object_data(read_data, from_mod, already_parsed=True)
-		duration = 0
-		name = ""  # Originally I chose the name to be the name of the file, but I'm instead going to name it after the output.
-
-		################
-		## Get output ##
-		################
-		try:
-			output_field = read_data["output"]
-			try:  # Output stores a dictionary
-				# Output_field can be under two different names.
-				try:
-					name = output_field["item"]
-				except KeyError:
-					name = output_field["name"]
-				# Count can be omitted, and it is assumed to be "1" (Thanks to Sayter for verifying this)
-				try:
-					count = output_field["count"]
-				except KeyError:
-					count = 1
-				outputs.append((name, name, count, from_mod))
-			except KeyError:  # Output stores an array of dictionaries
-				logging.error("File {} seems to be storing its output incorrectly.".format(filename))
-				raise KeyError("Output in file {} was incorrectly defined.".format(filename))
-		except KeyError:
-			logging.warning("Could not read output from file {}".format(filename))
-			raise KeyError("Could not read output from file {}".format(filename))
-
-		################
-		## Get inputs ##
-		################
-		try:
-			input_field = read_data["input"]
-			try:  # Input stores an array of dictionaries
-				for i in input_field:
-					try:
-						input_name = i["item"]
-					except KeyError:
-						input_name = i["name"]
-					try:
-						count = i["count"]
-					except KeyError:
-						count = 1
-					inputs.append((name, input_name, count, from_mod))
-			except KeyError:  # Input stores a dictionary
-				try:
-					input_name = input_field["item"]
-				except KeyError:
-					input_name = input_field["name"]
-				try:
-					count = input_field["count"]
-				except KeyError:
-					count = 1
-				inputs.append((name, input_name, count, from_mod))
-		except KeyError:
-			logging.warning("Could not read input from file {}".format(filename))
-			raise KeyError("Could not read input from file {}".format(filename))
-
-		################
-		## Get groups ##
-		################
-		try:
-			for group in read_data["groups"]:
-				recipes_groups.append((group, name, from_mod))
-		except KeyError:
-			# I believe that recipes *can* be defined without a recipe group, they just won't be able to be crafted anywhere. Therefore I will index the recipe.
-			recipes_groups.append(("?", name, from_mod))
-			logging.error("Could not read recipe groups from file {}".format(filename))
-
-		# Get duration
-		try:
-			duration = read_data["duration"]
-		except KeyError:
-			duration = 0.1  # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
-		# logging.debug("Duration not specified in file {}".format(Path(file).name))
-
-		collected_recipes.append((name, duration, from_mod))
-
 class database():
 
 	def __init__(self):
 		self.program_folder = str(Path.cwd()) # The location of this program's master folder.
 		self.data_folder = "{}/data".format(self.program_folder)
 		self.unpack_location = "{}/data/unpack".format(self.program_folder)  # Location where files will be unpacked to (string)
+		self.recipe_id_count = "{}/data/r_id.fox".format(self.program_folder) # This will store which ID we're up to in recipes. This is required to keep track of which values goes to which recipe.
 		makedirs(self.unpack_location, exist_ok=True)
 
 		# Set when the object is called.
@@ -153,19 +87,13 @@ class database():
 		# self.db_tables = ["recipes", "objects", "learn", "id_convert"]
 		if b_make_db:
 			self.create_tables()
-		self.reader = json_reader() # This is used to read unpacked files.
 
 		self.re_line_comment = re.compile(r'//.*') # This can find all line comments in JSON (//Text after this). TODO: I need to name sure this DOESN'T delete comments within keys/values. We'll have issues if it does.
 		self.re_block_comment = re.compile(r'(/\*)(.|\n)+?(\*/)') # This is used to search a JSON file for block comments.
-		self.re_colour_tag = re.compile(r'\^.*?;') # This will find colour tags in the names of objects, E.G ^orange;nameofobject^reset;
+		self.re_colour_tag = re.compile(r'\^.*?;') # This will find colour tags in the names of things, E.G ^orange;nameofobject^reset;
 
 		# Declares many more variables that may need to be reset at times.
 		self.reset()
-
-	def testdef(self):
-		def testdef2():
-			print("yaay")
-
 
 	# Process for updating the database:
 	# index_mods > prime_files > parse_files
@@ -324,6 +252,8 @@ class database():
 		:param checksum: (str) The checksum of the file before it was unpacked, for indexing purposes.
 		"""
 		dir = Path(filepath)
+		unexpected_error_msg = "Encountered an unexpected error while trying to read file {} from the mod {}. Traceback:\n{}"
+		object_list = []
 		# TODO: Figure out why "peacekeeper1" isn't being indexed.
 
 		####################
@@ -333,7 +263,6 @@ class database():
 		meta = str(dir) + "/_metadata"
 		fields = ["name", "friendlyName", "author", "version"] # This will contain all fields that can be handled in a similar/same way. Other fields may be done manually.
 		values = [] # A generic field we'll store things in temporarily
-		from_mod = "" # This is the mod that this unpack belongs to.
 
 		##############
 		## METADATA ##
@@ -345,12 +274,18 @@ class database():
 			except KeyError:
 				values.append("?")
 				logging.info("Could not find {} while searching {}".format(field, Path(meta).name))
-		from_mod = values[0] # This will be used by following fields to identify which mod this came from.
+		self.from_mod = values[0] # This will be used by following fields to identify which mod this came from.
 
 		self.cursor.execute("INSERT INTO modlist VALUES (?, ?, ?, ?, ?)", (checksum, values[0], values[1], values[2], values[3]))
 
+
+		################
+		## BULK PARSE ##
+		################
+		# Surgical imprecision.
+
 		# List of all file extensions we need to parse for useful data.
-		extensions = ["liqitem", "object", "matitem", "chest", "legs", "head", "activeitem", "augment", "back", "beamaxe", "consumable", "currency", "flashlight", "harvestingtool", "inspectiontool", "instrument", "item", "miningtool", "objectdisabled", "painttool", "thrownitem", "tillingtool", "wiretool"]
+		extensions = []#"liqitem", "matitem", "chest", "legs", "head", "activeitem", "augment", "back", "beamaxe", "consumable", "currency", "flashlight", "harvestingtool", "inspectiontool", "instrument", "item", "miningtool", "objectdisabled", "painttool", "thrownitem", "tillingtool", "wiretool"]
 		all_files = []
 
 		for exten in extensions:
@@ -361,7 +296,6 @@ class database():
 		# Search through all decompiled files.
 		learned_list = [] # _list variables will store anything that needs to be loaded into a a table. We'll do them in bulk to make it much, much faster.
 		stations_groups = []
-		object_list = []
 		for file in all_files:
 			try:
 				# Note: Starbound reads the extension of an object (such as .activeitem) to determine what it should search for. I should do the same to emulate what will be available in game.
@@ -380,7 +314,7 @@ class database():
 				display_name = self.json_get("shortdescription", read_data, error_message="File {} has no shortdescription key.".format(self.filename))
 				category = self.json_get("category", read_data, error_message="File {} has no category key.".format(self.filename))
 				if item_name != "?" and category != "?" and display_name != "?":
-					object_list.append((item_name, display_name, category, 0, 0, "?", "?", from_mod))
+					object_list.append((item_name, display_name, category, 0, 0, "?", "?", self.from_mod))
 
 
 				##################
@@ -390,7 +324,7 @@ class database():
 					learnedList = read_data["learnBlueprintsOnPickup"]
 					for learned in learnedList:
 						if learned: # I've seen some objects have no values within this field, so I need to check for that.
-							learned_list.append((item_name, learned, from_mod))
+							learned_list.append((item_name, learned, self.from_mod))
 				except KeyError: # This will trigger if there's nothing to be learned from this object.
 					pass
 
@@ -404,7 +338,7 @@ class database():
 				if cat == "crafting":
 					group = self.json_get("recipeGroup", read_data, error_on_fail=False) # This seems to be an old method they changed from at a later date, but of course they didn't remove it all.
 					if group != "?":
-						stations_groups.append((group, item_name, from_mod))
+						stations_groups.append((group, item_name, self.from_mod))
 
 					else:
 						upgrade_stages = self.json_get("upgradeStages", read_data, error_on_fail=False) # Check if this object has upgrade stages. If so, this will take priority. Hopefully that's how the game does it.
@@ -423,12 +357,12 @@ class database():
 									if o_item_name == "?": o_item_name = item_name
 									if o_display_name == "?": o_display_name = display_name
 									if o_item_name != "?" and o_display_name != "?" and category != "?":
-										object_list.append((o_item_name, o_display_name, category, 0, 0, "?", "?", from_mod))
+										object_list.append((o_item_name, o_display_name, category, 0, 0, "?", "?", self.from_mod))
 
 									####################
 									## stations_group ##
 									####################
-									values = self.create_group_list(o_item_name, from_mod, obj, dir)
+									values = self.create_group_list(o_item_name, self.from_mod, obj, dir)
 									for entry in values:
 										if entry[0] != "?":
 											stations_groups.append(entry)
@@ -450,7 +384,7 @@ class database():
 										window = self.json_get("windowtitle", panel)
 										a_display_name = window["title"]
 										if a_item_name != "?" and a_display_name != "?" and category != "?":
-											object_list.append((a_item_name, a_display_name, category, 0, 0, "?", "?", from_mod))
+											object_list.append((a_item_name, a_display_name, category, 0, 0, "?", "?", self.from_mod))
 
 										####################
 										## stations_group ##
@@ -458,7 +392,7 @@ class database():
 										filter = self.json_get("filter", interact_data)
 										for group in filter:
 											if group != "?":
-												stations_groups.append((group, a_item_name, from_mod))
+												stations_groups.append((group, a_item_name, self.from_mod))
 
 						else: # If it has no upgrade stages, check it as a normal object for groups
 							interact_data = self.json_get("interactData", read_data)
@@ -467,7 +401,7 @@ class database():
 								filter = self.json_get("filter", interact_data)
 								if filter != "?":
 									for group in filter:
-										stations_groups.append((group, item_name, from_mod))
+										stations_groups.append((group, item_name, self.from_mod))
 								elif filter == "?":
 									# Check config file
 									config_location = str(dir) + self.json_get("config", interact_data)
@@ -475,56 +409,110 @@ class database():
 									if config != "?":
 										filter = self.json_get("filter", config)
 										for group in filter:
-											stations_groups.append((group, item_name, from_mod))
+											stations_groups.append((group, item_name, self.from_mod))
 								elif filter == "config":
 									config_location = str(dir) + self.json_get("config", interact_data)
 									config = self.read_json(config_location)
 									if config != "?":
 										filter = self.json_get("filter", config)
 										for group in filter:
-											stations_groups.append((group, item_name, from_mod))
+											stations_groups.append((group, item_name, self.from_mod))
 			except Exception as ex:
 				logging.error("Encountered an unexpected error while trying to read file {}. Traceback:\n{}\n".format(Path(file).name, traceback.format_exc()))
 
 		end_parsing_files = datetime.now()
 		diff = end_parsing_files - start_parsing_files
-		logging.info("It took {} to read {} files, at a rate of {} per file".format(diff, num_of_files, diff / num_of_files))
+		try:
+			logging.info("It took {} to read {} files, at a rate of {} per file".format(diff, num_of_files, diff / num_of_files))
+		except ZeroDivisionError:
+			pass
 
+		# Insert collected data into database.
 		timer_insert_main = timer()
 		timer_insert_main.t_in()
-		self.cursor.executemany("INSERT INTO objects VALUES(?, ?, ?, ?, ?, ?, ?, ?)", object_list)
-		self.cursor.executemany("INSERT INTO learn VALUES(?, ?, ?)", learned_list)
-		self.cursor.executemany("INSERT INTO stations_groups VALUES(?, ?, ?)", stations_groups)
+		#self.cursor.executemany("INSERT INTO objects VALUES(?, ?, ?, ?, ?, ?, ?, ?)", object_list)
+		#self.cursor.executemany("INSERT INTO learn VALUES(?, ?, ?)", learned_list)
+		#self.cursor.executemany("INSERT INTO stations_groups VALUES(?, ?, ?)", stations_groups)
 		diff = timer_insert_main.t_out()
 		insert_num = len(object_list) + len(learned_list) + len(stations_groups)
-		logging.info("It took {} to insert {} files into the database, for a rate of {} per insert".format(diff, insert_num, diff/insert_num))
+		try:
+			logging.info("It took {} to insert {} files into the database, for a rate of {} per insert".format(diff, insert_num, diff/insert_num))
+		except ZeroDivisionError:
+			pass
 
+		################
+		## Consumable ##
+		################
+		consumables = list(dir.glob("**/*.consumable"))
+		my_object_list = [] # Contains the bulk of information about an object.
+		consumable_list = []
+		for file in consumables:
+			self.filename = Path(file).name
+			try:
+				data = self.read_consumable_file(file)
+				my_object_list.append(data[0])
+				consumable_list.append(data[1])
+			except Exception:
+				logging.error(unexpected_error_msg.format(self.filename, self.from_mod, traceback.format_exc()))
 
-		#########################
-		## Create recipe lists ##
-		#########################
+		object_list.extend(my_object_list)
+
+		#############
+		## Recipes ##
+		#############
+		try:
+			with open(self.recipe_id_count, "r") as f:
+				recipe_count = int(f.read())
+		except FileNotFoundError:
+			logging.warning("Recipe ID count file could not be found. If the database isn't empty, this might cause ID overlapping.")
+			recipe_count = 0
+		except ValueError:
+			logging.warning("Recipe Count cannot be read, was likely formatted incorrectly. If the database isn't empty, this might cause ID overlapping.")
+			recipe_count = 0
+
+		# Read from files
 		recipes = list(dir.glob("**/*.recipe"))
-		collected_recipes = [] # I'm going to collect all of the recipes and commit them to the database in an executemany to (hopefully) speed the process up.
+		collected_recipes = []  # I'm going to collect all of the recipes and commit them to the database in an executemany to (hopefully) speed the process up.
 		recipes_groups = []
 		inputs = []
-		outputs = []
 		for file in recipes:
+			self.filename = Path(file).name
 			try:
-				self.filename = Path(file).name
-				self.reader.recipe(file)
-			except Exception as ex:
-				logging.error("Encountered an unexpected error while trying to read file {}. Traceback:\n{}".format(Path(file).name, traceback.format_exc()))
+				data = self.read_recipe_file(file, recipe_count)
+				# Assign received data.
+				recipe_count += 1
+				collected_recipes.append(data[0])
+				for input_field in data[1]:
+					inputs.append(input_field)
+				for group_field in data[2]:
+					recipes_groups.append(group_field)
+			except Exception:
+				logging.error(unexpected_error_msg.format(self.filename, self.from_mod, traceback.format_exc()))
 
+
+		# Add collected data to the database.
 		in_time = datetime.now()
-		self.cursor.executemany("INSERT INTO recipes VALUES(?, ?, ?)", collected_recipes)
-		self.cursor.executemany("INSERT INTO recipes_groups VALUES(?, ?, ?)", recipes_groups)
+
+		self.cursor.executemany("INSERT INTO things VALUES(?, ?, ?, ?, ?, ?, ?)", object_list)
+		# Recipes
+		self.cursor.executemany("INSERT INTO recipes VALUES(?, ?, ?, ?, ?)", collected_recipes)
 		self.cursor.executemany("INSERT INTO input VALUES(?, ?, ?, ?)", inputs)
-		self.cursor.executemany("INSERT INTO output VALUES(?, ?, ?, ?)", outputs)
+		self.cursor.executemany("INSERT INTO recipes_groups VALUES(?, ?, ?)", recipes_groups)
+		# Consumables
+		self.cursor.executemany("INSERT INTO consumables VALUES(?, ?, ?, ?, ?, ?)", consumable_list)
+
 		out_time = datetime.now()
 
+		with open(self.recipe_id_count, "w") as f:
+			f.write(str(recipe_count))
+
+		# Report performance
 		recipe_num = len(collected_recipes) # Used to calculate average time.
 		diff = out_time - in_time # Time it took to load all recipes in.
-		print("It took {} to insert all recipes for an average time of {}".format(diff, diff/recipe_num))
+		try:
+			print("It took {} to insert all recipes for an average time of {}".format(diff, diff/recipe_num))
+		except ZeroDivisionError:
+			pass
 
 		self.connect.commit()
 
@@ -533,7 +521,7 @@ class database():
 		:param mod_name: ID of the mod you wish to remove.
 		:param mod_checksum: The checksum of the mod, if we don't have the name. This will be converted into the name using the modlist table.
 		"""
-		tables = ["recipes", "recipes_groups", "stations_groups", "output", "input", "objects", "learn", "modlist"] # The names of all tables in the database.
+		tables = ["recipes", "recipes_groups", "stations_groups", "output", "input", "things", "learn", "modlist"] # The names of all tables in the database.
 
 		if mod_checksum:
 			mod_name = self.cursor.execute("SELECT from_mod FROM modlist WHERE checksum={}".format(mod_checksum))
@@ -546,7 +534,7 @@ class database():
 
 	def clear_database(self):
 		"""Delete the database lmao"""
-		db_file = self.data_folder + "/recipe_test.foxdb"
+		db_file = self.data_folder + "/database.foxdb"
 		if path.isfile(db_file):
 			self.connect.close()
 			remove(db_file)
@@ -566,6 +554,10 @@ class database():
 			# self.db_tables = ["recipes", "objects", "learn", "id_convert"]
 			if b_make_db:
 				self.create_tables()
+
+		if path.isfile(self.recipe_id_count):
+			remove(self.recipe_id_count)
+
 
 
 
@@ -598,22 +590,21 @@ class database():
 
 	def convert_id(self, id="", name=""):
 		"""
-		Search the 'objects' table for the converted name of this object.
+		Search the 'things' table for the converted name of this object.
 		:param id: (str) The object's ID. If this is left blank, I'll assume
 		:param name: (str) The object's name, to convert into an ID.
 		:return: (str) if id: The matching display_name for this object. May contain colour highlighting that needs to be parsed (E.G ^orange;Table^reset;).
 				(array) if name: An array of all matching IDs.
 		"""
-		if id != "": # Searching for ID will only match exact results. This is because I'm assuming anyone who searches an ID has the full ID.
-			result = self.search("objects", where_value=["item_name='{}'".format(id)])
+		if id != "": # Searching for ID will only match exact results. This is because I'm assuming those who search an ID has the full ID (likely via an automated process).
+			result = self.cursor.execute("SELECT display_name FROM things WHERE item_name=(?)", (id,)).fetchall()
 			try:
 				return result[0][1]
 			except IndexError:
-				logging.warning("Search for the ID {} in objects returned nothing".format(id))
-				return "?"
+				logging.warning("Search for the ID {} in things returned nothing".format(id))
+				return id
 		else: # Searching for a display_name will always use RegEx
-			where_field = "display_name REGEXP '{}'".format(name)
-			result = self.search("objects", where_value=[where_field])
+			result = self.cursor.execute("SELECT item_name FROM things WHERE display_name REGEXP (?)", (name,))
 			all_results = []
 			for value in result: # Cycle through all results...
 				all_results.append(value[0]) # And store the first entry of the tuple (the item_name) in an array.
@@ -633,8 +624,111 @@ class database():
 			logging.warning("remove_colour_tags was called with a value that is not a string or a list. Value: {}".format(text))
 
 
-	# Recipe junk
-	def search_recipe(self, output, input, duration, bench, from_mod):
+	# File parsing presets
+	def read_object_file(self, filepath):
+		objects_data = []
+		read_data = self.read_json(str(filepath))
+
+
+		pass
+
+	def read_recipe_file(self, filepath, recipe_id):
+		"""
+		:param filepath: The file that needs to be read
+		:param recipe_id: The ID this recipe will have.
+		:return: Multidimensional array structured like the following:
+		[
+			('recipename', 'recipe_output', quantity, duration, 'from_mod'),
+			[
+				('recipename', 'recipe_input', count, 'from_mod'), (...)
+			],
+			[
+				('crafting_group', 'recipename', 'from_mod'), (...)
+			]
+		]
+		"""
+		recipes_groups = []
+		inputs = []
+		read_data = self.read_json(str(filepath))
+
+		#################
+		## Get outputs ##
+		#################
+		output_field = self.json_get("output", read_data, error_level=logging.error)
+		outputs_name = self.json_get("item", output_field, error_on_fail=False)
+		if outputs_name == "?":
+			# This will run if "item" is not specified.
+			err_msg = "File {} from mod {} has a faulty 'output' field. It might be storing its data as an array of key:values rather than just 2 key:values.".format(self.filename, self.from_mod)
+			self.outputs_name = self.json_get("name", output_field, error_level=logging.error, error_message=err_msg)
+		outputs_count = self.json_get("count", output_field, error_on_fail=False, default=1)
+
+		################
+		## Get inputs ##
+		################
+		input_field = self.json_get("input", read_data, error_level=logging.error)
+		if len(input_field) < 1:
+			logging.error("File {} from mod {} has an empty input field".format(self.filename, self.from_mod))
+		for i in input_field: # NOTE: I'm not sure if it's possible for an input to store a dictionary instead of an array of dictionaries. For now I will assume it cannot.
+			input_name = self.json_get("item", i, error_on_fail=False)
+			if input_name == "?":
+				input_name = self.json_get("name", i, error_level=logging.error,
+					error_message="File {} from mod {} seems to have a faulty input field".format(self.filename, self.from_mod))
+			input_count = self.json_get("count", i, default=1)
+			inputs.append((recipe_id, input_name, input_count, self.from_mod))
+
+		################
+		## Get groups ##
+		################
+		groups = self.json_get("groups", read_data)
+		for group in groups:
+			recipes_groups.append((group, recipe_id, self.from_mod))
+
+		# Get duration
+		duration = self.json_get("duration", read_data, default=0.1, error_on_fail=False) # Thank you to Pixelflame5826#1645 on Discord for helping me out here <3
+
+		collected_recipe = (outputs_name, recipe_id, outputs_count, duration, self.from_mod)
+		return [collected_recipe, inputs, recipes_groups]
+	
+	def read_consumable_file(self, filepath):
+		"""Parses a .consumable file, to be used within the database.
+		:param filepath: The location on disk of the file to read.
+		:return: A multidimensional array with data formatted like so:
+		(
+			(name, display_name, category, price, rarity, description, from_mod),
+			(name, effects, rotting_mult, max_stack, food_value, from_mod)
+		)
+		"""
+		read_data = self.read_json(str(filepath))
+
+		# Object data
+		name = self.json_get("itemName", read_data, error_level=logging.error)
+		display_name = self.json_get("shortdescription", read_data, error_level=logging.critical, default=name) # Again, marked as critical so I can find instances of this happening.
+		category = self.json_get("category", read_data, error_level=logging.info, default="Uncategorized :(")
+		rarity = self.json_get("rarity", read_data, error_level=logging.critical, default="Common?") # For now I'm going to cause this to trigger a critical error, so I can find examples of this happening in code.
+		price = self.json_get("price", read_data, error_level=logging.info, default="-1")
+		description = self.json_get("description", read_data, error_level=logging.critical, default="Missing description.")
+
+		object_data = (name, display_name, category, price, rarity, description, self.from_mod)
+
+		# Consumable data
+		effects = "?" # Right now I haven't investigated how effects work, so I don't know what data should be applied here.
+		food_value = self.json_get("foodValue", read_data, error_level=logging.info, default=-1)
+		max_stack = self.json_get("maxStack", read_data, error_level=logging.info, default=-1)
+		rotting_mult = self.json_get("rottingMultiplier", read_data, error_level=logging.info, default=-1)
+
+		consumable_data = (name, effects, rotting_mult, max_stack, food_value, self.from_mod)
+
+		return (object_data, consumable_data)
+
+
+
+
+
+
+	# Recipe functions
+	# Process for getting a recipe from a search:
+	# search_recipe > get_recipe_information > extract_recipe_string
+	def search_recipe(self, output, input, duration, bench, from_mod, display_name_search=True):
 		"""
 		Search for a set of recipes that contains ALL of the input data. If a field is left blank, it is not searched for.
 		:param output: (str) The display_name of one of the outputs of the recipe. This will also be the name of the recipe (I hope)
@@ -642,6 +736,7 @@ class database():
 		:param duration: (float) The time it takes for the recipe to craft.
 		:param bench: (str) The display_name of the bench that this recipe can be crafted at.
 		:param from_mod: (str) The friendly_name of the mod a recipe comes from
+		:param display_name_search: (bool) If it should convert from display name to itemID.
 		:return: (set) The ID of any recipes that match ALL given fields.
 		If some data could not be parsed: (str) "?"
 		"""
@@ -657,18 +752,26 @@ class database():
 		# This method I'm going to do is probably very bad. I'm creating *dozens* of where_value searches, because I'm storing IDs instead of display_names.
 		# Too bad!
 		# What I'm doing is running a SQL search for each provided field, then comparing the intersection of all of these sets to figure out which recipes are valid candidates.
-		if input:
-			self.cursor.execute("SELECT recipe_name FROM input WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP (?))", (input,))
+		if output:
+			if display_name_search:
+				self.cursor.execute("SELECT recipe_id FROM recipes WHERE name IN (SELECT item_name FROM things WHERE display_name REGEXP (?))", (output,))
+			else:
+				self.cursor.execute("SELECT recipe_id FROM recipes WHERE name REGEXP (?)", (output,))
+
 			semi_set = []
 			for row in self.cursor.fetchall():
 				semi_set.append(row[0])
 			all_ids = set_merge(all_ids, semi_set)
 			if not all_ids: return "?"
 
-		if output:
-			self.cursor.execute("SELECT recipe_name FROM output WHERE item IN (SELECT item_name FROM objects WHERE display_name REGEXP (?))", (output,))
+		if input:
+			if display_name_search:
+				self.cursor.execute("SELECT recipe_id FROM input WHERE item IN (SELECT item_name FROM things WHERE display_name REGEXP (?))", (input,))
+			else:
+				self.cursor.execute("SELECT recipe_id FROM input WHERE item REGEXP (?)", (input,))
+
 			semi_set = []
-			for row in self.cursor.fetchall():
+			for row in self.cursor.fetchall(): # Since we're searching the input table, we'll get multiple of the same ID.
 				semi_set.append(row[0])
 			all_ids = set_merge(all_ids, semi_set)
 			if not all_ids: return "?"
@@ -676,7 +779,7 @@ class database():
 		if duration:
 			# TODO: I need to find a way to allow for comparisons of duration (And of quantity of input/output)
 			try:
-				self.cursor.execute("SELECT name FROM recipes WHERE duration=(?)", (duration,))
+				self.cursor.execute("SELECT recipe_id FROM recipes WHERE duration=(?)", (duration,))
 			except sqlite3.OperationalError:
 				logging.error("Failed to search for given duration in search_recipe. Duration given: {}".format(duration))
 				return "?"
@@ -687,11 +790,16 @@ class database():
 			if not all_ids: return "?"
 
 		if bench:
-			self.cursor.execute("""SELECT recipe_name FROM recipes_groups WHERE grouping IN (
-				SELECT grouping FROM stations_groups WHERE station IN (
-					SELECT item_name FROM objects WHERE display_name REGEXP (?)
-				)
-			)""", (bench,))
+			if display_name_search:
+				self.cursor.execute("""SELECT recipe_id FROM recipes_groups WHERE grouping IN (
+					SELECT grouping FROM stations_groups WHERE station IN (
+						SELECT item_name FROM things WHERE display_name REGEXP (?)
+					)
+				)""", (bench,))
+			else:
+				self.cursor.execute("""SELECT recipe_id FROM recipes_groups WHERE grouping IN (
+					SELECT grouping FROM stations_groups WHERE station REGEXP (?)
+				)""", (bench,))
 			semi_set = []
 			res = self.cursor.fetchall()
 			for row in res:
@@ -700,7 +808,10 @@ class database():
 			if not all_ids: return "?"
 
 		if from_mod:
-			self.cursor.execute("SELECT name FROM recipes WHERE from_mod IN (SELECT from_mod FROM modlist WHERE friendly_name REGEXP (?))", (from_mod,))
+			if display_name_search:
+				self.cursor.execute("SELECT recipe_id FROM recipes WHERE from_mod IN (SELECT from_mod FROM modlist WHERE friendly_name REGEXP (?))", (from_mod,))
+			else:
+				self.cursor.execute("SELECT recipe_id FROM recipes WHERE from_mod REGEXP (?)", (from_mod,))
 			semi_set = []
 			for row in self.cursor.fetchall():
 				semi_set.append(row[0])
@@ -723,11 +834,11 @@ class database():
 		This will search through all recipe IDs provided, and return a 3D array containing all relevant information.
 		This is to be used when displaying a recipe's information, and can be provided the result from search_recipe
 		:param recipe_ids: (array of strings) The ID of a recipe. This must be an exact name.
-		:return: A 3D array with 6 cells per entry. The following array is for a single given recipe_id:
+		:return: A multidimensional array with 6 "cells" per entry recipe_id. The following array is for a single given recipe_id:
 		[
 			[
-				[recipe_id, duration, from_mod], [learned_object1, learned_object2],
-				[output1, output_count1, output2, output_count2], [input1, input_count1, input2, input_count2],
+				[name, recipe_id, count, duration, from_mod], [learned_object1, learned_object2],
+				[input1, input_count1, input2, input_count2],
 				[workbench_name1, workbench_name2], [grouping1, grouping2]
 			]
 		]
@@ -738,18 +849,21 @@ class database():
 			sub_array = [] # The array all of the following data will be contained in.
 			recipe_id = recipe
 
-			self.cursor.execute("SELECT * FROM recipes WHERE name='{}'".format(recipe_id))
-			recipes_db = self.cursor.fetchall()
+			self.cursor.execute("SELECT * FROM recipes WHERE recipe_id=(?)", (recipe_id,))
+			recipes_db = self.cursor.fetchall() # Hopefully there should only be once result here.
 
-			recipe_duration = recipes_db[0][1]
-			recipe_mod = recipes_db[0][2]
-			group1 = [recipe_id, recipe_duration, recipe_mod]
+			recipe_name = recipes_db[0][0]
+			recipe_id = recipes_db[0][1]
+			recipe_count = recipes_db[0][2]
+			recipe_duration = recipes_db[0][3]
+			recipe_mod = recipes_db[0][4]
+			group1 = [recipe_name, recipe_id, recipe_count, recipe_duration, recipe_mod]
 
 			##################
 			## Learned From ##
 			##################
 			learned_from = []
-			self.cursor.execute("SELECT display_name FROM objects WHERE item_name IN (SELECT from_object FROM learn WHERE recipe='{}')".format(recipe_id))
+			self.cursor.execute("SELECT from_object FROM learn WHERE recipe_id=(?)", (recipe_id,))
 			for object in self.cursor.fetchall():
 				learned_from.append(object[0])
 
@@ -757,25 +871,16 @@ class database():
 			## Recipe Groups ##
 			###################
 			recipe_groups = []
-			self.cursor.execute("SELECT grouping FROM recipes_groups WHERE recipe_name='{}'".format(recipe_id))
+			self.cursor.execute("SELECT grouping FROM recipes_groups WHERE recipe_id=(?)", (recipe_id,))
 			raw_recipe_groups = self.cursor.fetchall()
 			for group in raw_recipe_groups:
 				recipe_groups.append(group[0])
-
-			############
-			## Output ##
-			############
-			recipe_outputs = []
-			self.cursor.execute("SELECT * FROM output WHERE recipe_name='{}'".format(recipe_id))
-			for output in self.cursor.fetchall():
-				recipe_outputs.append(output[1])
-				recipe_outputs.append(output[2])
 
 			###########
 			## Input ##
 			###########
 			recipe_inputs = []
-			self.cursor.execute("SELECT * FROM input WHERE recipe_name='{}'".format(recipe_id))
+			self.cursor.execute("SELECT * FROM input WHERE recipe_id=(?)", (recipe_id,))
 			for input in self.cursor.fetchall():
 				recipe_inputs.append(input[1])
 				recipe_inputs.append(input[2])
@@ -784,18 +889,13 @@ class database():
 			## Created At ##
 			################
 			recipe_tables = []
-			self.cursor.execute("""SELECT display_name FROM objects WHERE item_name IN (
-				SELECT station FROM stations_groups WHERE grouping IN (
-					SELECT grouping FROM recipes_groups WHERE recipe_name='{}'))""".format(recipe_id))
-			# This last nested SELECT is needless. I already have stored all of the grouping values in recipe_groups. But SQLite3 has forced my hand.
-			# TODO: Come back and figure out why SQLite hates me. (I probably won't because it works fine)
+			self.cursor.execute("""SELECT station FROM stations_groups WHERE grouping IN (SELECT grouping FROM recipes_groups WHERE recipe_id=(?))""", (recipe_id,))
 			all_tables = self.cursor.fetchall()
 			for table in all_tables:
 				recipe_tables.append(table[0])
 
 			sub_array.append(group1)
 			sub_array.append(learned_from)
-			sub_array.append(recipe_outputs)
 			sub_array.append(recipe_inputs)
 			sub_array.append(recipe_tables)
 			sub_array.append(recipe_groups)
@@ -810,82 +910,72 @@ class database():
 
 		print_values = []
 		for recipe in recipe_data:
-			item_id = recipe[0][0] # The ID of the output item.
-			duration = recipe[0][1] # How long it takes to craft
-			from_mod = recipe[0][2] # Which mod this recipe came from
+			output_name = recipe[0][0] # The name of the object that is output.
+			output_display_name = self.remove_colour_tags(self.convert_id(id=output_name))
+			recipe_id = recipe[0][1] # The ID of the recipe. Used to search for data about it.
+			output_count = recipe[0][2] # How many of this object the recipe outputs.
+			duration = recipe[0][3]
+			from_mod = recipe[0][4]
 
-			# Which objects you can pick up to learn this recipe.
+			# Which things you can pick up to learn this recipe.
 			learned_from = ""
 			list_size = len(recipe[1])
 			for index, learned in enumerate(recipe[1]):
+				display_name = self.remove_colour_tags(self.convert_id(id=learned))
 				if index == 0:
-					learned_from = learned
+					learned_from = display_name
 				elif index == (list_size - 1):  # Last entry of the list
-					learned_from += " and {}".format(learned)
+					learned_from += " and {}".format(display_name)
 				else:
-					learned_from += ", {}".format(learned)
-
-			# What this recipe creates
-			output = ""
-			recipe_name = ""
-			num_of_outputs = int(len(recipe[2]) / 2)  # This is divided by two because there will always be 2 entries per output, count and item
-			for index in range(num_of_outputs):
-				list_pos = index * 2
-				object_name = self.remove_colour_tags(self.convert_id(id=recipe[2][list_pos]))
-				object_count = recipe[2][list_pos + 1]
-
-				if index == 0:
-					recipe_name = "{}".format(object_name)
-					output = "{} (x{})".format(object_name, object_count)
-				else:
-					output += ", {} (x{})".format(object_name, object_count)
-					recipe_name += "{}".format(object_name)  # Hopefully this never happens.
+					learned_from += ", {}".format(display_name)
 
 			# What items are required by this recipe
 			inputval = ""
-			num_of_inputs = int(len(recipe[3]) / 2)  # This is divided by two because there will always be 2 entries per input, count and item
+			num_of_inputs = int(len(recipe[2]) / 2)  # This is divided by two because there will always be 2 entries per input, count and item
 			for index in range(num_of_inputs):
 				list_pos = index * 2
-				object_name = self.remove_colour_tags(self.convert_id(id=recipe[3][list_pos]))
-				object_count = recipe[3][list_pos + 1]
+
+				object_name = recipe[2][list_pos]
+				display_name = self.remove_colour_tags(self.convert_id(object_name))
+				object_count = recipe[2][list_pos + 1]
 
 				if index == 0:
-					inputval = "{} (x{})".format(object_name, object_count)
+					inputval = "{} (x{})".format(display_name, object_count)
 				else:
-					inputval += ", {} (x{})".format(object_name, object_count)
+					inputval += ", {} (x{})".format(display_name, object_count)
 
 			# Any benches this crafting recipe can be found at.
 			benches = ""
-			list_size = len(recipe[4]) # Used to check what position in the list of benches we're in, so we can change the verbal structure of the sentence.
-			for index, bench_name in enumerate(recipe[4]):
-				bench_name_clean = self.remove_colour_tags(bench_name)
+			list_size = len(recipe[3]) # Used to check what position in the list of benches we're in, so we can change the verbal structure of the sentence.
+			for index, bench_name in enumerate(recipe[3]):
+				display_name = self.remove_colour_tags(bench_name)
 				if index == 0:
-					benches = "{}".format(bench_name_clean)
+					benches = "{}".format(display_name)
 				elif index == (list_size - 1):
-					benches += " and {}".format(bench_name_clean)
+					benches += " and {}".format(display_name)
 				else:
-					benches += ", {}".format(bench_name_clean)
+					benches += ", {}".format(display_name)
 
 			# The crafting groups that this recipe is available in.
 			groups = ""
-			list_size = len(recipe[5])
-			for index, group_name in enumerate(recipe[5]):
+			list_size = len(recipe[4])
+			for index, group_name in enumerate(recipe[4]):
 				if index == 0:
 					groups = "{}".format(group_name)
 				else:
 					groups += ", {}".format(group_name)
 
-			print_value = """Recipe name: {}
-	Crafted at: {}
-	Crafted with: {}
-	Creates: {}
-	Learned from: {}
-	This recipe takes {}s to craft.
-	
-	Meta info:
-	Recipe groups: {}
-	Item ID: {}
-	From Mod: {}\n\n""".format(recipe_name, benches, inputval, output, learned_from, duration, groups, item_id, from_mod)
+			print_value = "Recipe name: {}\n"\
+				"Crafted at: {}\n"\
+				"Crafted with: {}\n"\
+				"Creates: {} (x{})\n"\
+				"Learned from: {}\n"\
+				"This recipe takes {}s to craft.\n\n"\
+				"Meta info:\n"\
+				"Recipe groups: {}\n"\
+				"Item ID: {}\n"\
+				"From Mod: {}\n"\
+				"==========================================\n".format(output_display_name, benches, inputval, output_display_name, output_count, learned_from, duration, groups, output_name, from_mod)
 			print_values.append(print_value)
 
 		return print_values
@@ -900,11 +990,10 @@ class database():
 	# Private functions. Things that will only be used within this class.
 
 	# Remove instanecs of filename from this.
-	def create_group_list(self, name, from_mod, obj, directory):
+	def create_group_list(self, name, obj, directory):
 		"""
 		Used to parse an object and check if it contains elements of a crafting table. If so, return information required for a group_list entry.
 		:param name: (str) Name of this object.
-		:param from_mod: (str)
 		:param obj: (str) The json you're attemping to check.
 		:param directory: The directory of the unpacked files.
 		"""
@@ -916,7 +1005,7 @@ class database():
 			filter = self.json_get("filter", interact_data)
 			if filter != "?":
 				for group in filter:
-					all_groups.append((group, name, from_mod))
+					all_groups.append((group, name, self.from_mod))
 			else:
 				# Check config file
 				config_location = str(directory) + self.json_get("config", interact_data)
@@ -924,12 +1013,12 @@ class database():
 				if config != "?":
 					filter = self.json_get("filter", config)
 					for group in filter:
-						all_groups.append((group, name, from_mod))
+						all_groups.append((group, name, self.from_mod))
 				else:
 					logging.warning("Cannot read config file at {}".format(config_location))
-					all_groups.append(("?", name, from_mod))
+					all_groups.append(("?", name, self.from_mod))
 		else:
-			all_groups.append(("?", name, from_mod))
+			all_groups.append(("?", name, self.from_mod))
 		return all_groups
 
 	def read_json(self, file_path):
@@ -979,6 +1068,7 @@ class database():
 		self.b_lost_mods = False  # Whether there are mods that used to be on here, but are no longer detected.
 
 		self.filename = "" # The name of the file that we're currently parsing.
+		self.from_mod = "" # The name of the mod we're currently parsing.
 
 	def remove_staged(self, checksum):
 		"""Removes the folder and all files of a staged checksum. Also removes the checksum from the database.
@@ -999,13 +1089,12 @@ class database():
 		# Every entry should always contain an accurate "from_mod" field.
 		# Any place that would have to store multiple entries (such as recipe input fields), the values are put into a different database, and connected by name. See diagram for relationships.
 
-		# Objects table
-		self.cursor.execute("""CREATE TABLE objects (
+		# Things table
+		self.cursor.execute("""CREATE TABLE things (
 			item_name TEXT,
 			display_name TEXT,
 			category TEXT,
 			price INTEGER,
-			two_handed INTEGER,
 			rarity TEXT,
 			description TEXT,
 			from_mod TEXT
@@ -1014,6 +1103,8 @@ class database():
 		# Recipes table
 		self.cursor.execute("""CREATE TABLE recipes (
 			name TEXT,
+			recipe_id INTEGER,
+			count INTEGER,
 			duration REAL,
 			from_mod TEXT
 			)""")
@@ -1021,24 +1112,58 @@ class database():
 		# Learning table
 		self.cursor.execute("""CREATE TABLE learn (
 			from_object TEXT,
-			recipe TEXT,
+			recipe_id INTEGER,
 			from_mod TEXT
 			)""")
 
-		# The following four tables are essentially used as arrays in other tables. SQLite3 doesn't support arrays as a datatype.
+		######################
+		## EXTENSION TABLES ##
+		######################
+		# Tables that contain more data about an object based on the type of object it is.
+		# Consumables extension table
+		self.cursor.execute("""CREATE TABLE consumables (
+			item_name TEXT,
+			effects TEXT,
+			rotting_multiplier REAL,
+			max_stack INTEGER,
+			food_value REAL,
+			from_mod TEXT
+			)""")
+
+		# Objects extension table
+		self.cursor.execute("""CREATE TABLE objects (
+			item_name TEXT,
+			interact_action TEXT,
+			colony_tags TEXT,
+			race TEXT,
+			printable INTEGER,
+			from_mod TEXT
+			)""")
+
+		# Descriptions table. Yes, I could have merged this with other tables, but I won't.
+		self.cursor.execute("""CREATE TABLE racial_descriptions (
+			item_name TEXT,
+			race TEXT,
+			description TEXT,
+			from_mod TEXT
+			)""")
+
+		# Objects that have the interact_action "OpenCraftingInterface"
+		#self.cursor.execute("""CREATE TABLE crafting_objects (
+
+		# The following three tables are essentially used as arrays in for the recipes table.. SQLite3 doesn't support arrays as a datatype.
 		# Input table
 		self.cursor.execute("""CREATE TABLE input (
-			recipe_name TEXT,
+			recipe_id INTEGER,
 			item TEXT,
 			count INTEGER,
 			from_mod TEXT
 			)""")
 
-		# Output table
-		self.cursor.execute("""CREATE TABLE output (
-			recipe_name TEXT,
-			item TEXT,
-			count INTEGER,
+		# recipes_groups table
+		self.cursor.execute("""CREATE TABLE recipes_groups (
+			grouping TEXT,
+			recipe_id INTEGER,
 			from_mod TEXT
 			)""")
 
@@ -1046,13 +1171,6 @@ class database():
 		self.cursor.execute("""CREATE TABLE stations_groups (
 			grouping TEXT,
 			station TEXT,
-			from_mod TEXT
-			)""")
-
-		# recipes_groups table
-		self.cursor.execute("""CREATE TABLE recipes_groups (
-			grouping TEXT,
-			recipe_name TEXT,
 			from_mod TEXT
 			)""")
 
@@ -1072,23 +1190,36 @@ class database():
 
 		self.cursor.execute("commit")
 
-	def json_get(self, key, data, error_on_fail=True, error_message=""):
+	def json_get(self, key, data, error_on_fail=True, error_message="", default="?", error_level=logging.warning):
 		"""
 		Provides generic error handling when retrieving a key:value from a dictionary.
 		:param key: (str) The key that you're trying to read.
 		:param data: (dict) The dictionary you're trying to read from.
-		:param error_on_fail: (bool) Whether it should print an error message if this operation fails
+		:param error_on_fail: (bool) Whether it should log a message on fail, and raise an exception. Disabling this will turn off logging on error.
 		:param error_message: (str) The message that should be printed if this operation fails.
+		:param default: The value that will be returned if this value cannot be found.
+		:param error_level: The level of error that should be logged.
+			Setting to info or lower will prevent an exception from being raised.
+			Changing default will prevent an exception from being raised.
 		"""
 		try:
 			val = data[key]
 		except KeyError:
-			val = "?"
+			# Log error
 			if error_on_fail:
 				if error_message:
-					logging.warning(error_message)
+					err_msg = error_message
 				else:
-					logging.info("File {} has no key {}.".format(self.filename, key))
+					err_msg = "File {} from mod {} has no key {}".format(self.filename, self.from_mod, key)
+				error_level(err_msg)
+
+				safe_errors = [logging.info, logging.debug]  # List of errors that will not raise an exception.
+				if error_level not in safe_errors and default == "?":
+					raise JsonGetError(err_msg + ". Traceback:\n{}".format(traceback.format_exc()))
+
+			val = default
+
+		# I should remove this, too likely to catch an unexpected error.
 		except TypeError:
 			val = "config"
 			if error_on_fail:
@@ -1096,23 +1227,15 @@ class database():
 
 		return val
 
-
-
-def regexp(expr, item):
-	reg = re.compile(expr, re.I) # This will make ALL searches case insensitive. Too bad!
-	return reg.search(item) is not None
-
-
-def generate_checksum(file_path):
-	#logging.debug("Generating checksum for file located at {}...".format(file_path))
-	hash_md5 = md5()
-	with open(file_path, "rb") as f:
-		for chunk in iter(lambda: f.read(4096), b""):
-			hash_md5.update(chunk)
-	checksum = hash_md5.hexdigest()
-
-	return checksum
-
+# Exceptions
+class Error(Exception):
+	pass
+class RecipeError(Error):
+	"""Any error related to the reading of a recipe."""
+	pass
+class JsonGetError(Error):
+	"""Returned if the json_get function is unable to read data."""
+	pass
 
 
 
@@ -1123,4 +1246,4 @@ if __name__ == "__main__":
 	d.index_mods()
 
 
-# woo line 1000 (right now). arix is gayrix
+# woo line 1000 (right now).

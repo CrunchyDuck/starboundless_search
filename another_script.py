@@ -1,15 +1,14 @@
 try:
-	try:
-		import database as db
-		import logging
-		from pathlib import Path
-		import traceback
-	except ModuleNotFoundError as e:
-		print("{}\nThis likely means that there's a file missing. If so, please contact me (CrunchyDuck) and show me this error message.".format(e))
-		input()
-		exit()
-
-	program_folder = str(Path.cwd().parent) # The location of this program's master folder.
+	import database as db
+	import logging
+	from pathlib import Path
+	import traceback
+except ModuleNotFoundError as e:
+	print("{}\nThis likely means that there's a file missing. If so, please contact me (CrunchyDuck) and show me this error message.".format(e))
+	input()
+	exit()
+try:
+	program_folder = str(Path.cwd()) # The location of this program's master folder.
 	default_steamapps_directory = "C:/Program Files (x86)/Steam/steamapps" # This is where it will install to by default. If the user does not provide a directory, we will try this one, and yell if it is incorrect.
 
 
@@ -24,8 +23,8 @@ Case in point, the next step is ABSOLUTELY making a user interface, so you don't
 I won't ramble much more, if you wish to know more about this, have a suggestion, bug, etc, feel free to talk to me at https://discord.gg/TzTn4cy
 ======== Made with love by CrunchyDuck ========"""
 	textsearch = """Right now, this search engine has the base game indexed, and Frackin Universe.
-You may search for any objects or recipes within either of those. More options and features available in the future."""
-	text_search_options = "\nEnter the number of the search type you wish to use:\n1. Recipe search\n2. Object search(whoops I couldn't get this running before release date)\n3. Credits"
+You may search for any things or recipes within either of those. More options and features available in the future."""
+	text_search_options = "\nEnter the number of the search type you wish to use:\n1. Recipe search\n2. Object search (whoops I couldn't get this running before release date)\n3. Credits"
 	text_search_recipe = """\nEnter the number of the field of the recipe you want to search for:
 1. Recipe name (Which is also what it creates, such as 'dumplin')
 2. Recipe input (Such as 'iron b')" 
@@ -111,7 +110,7 @@ Thank you to all of the Frackin Universe Discord for just being nice and giving 
 
 			# Perform a search
 			print("Searching for creates={}, input={}, duration={}, bench={}, from_mod={}...".format(creates, inputval, duration, bench, from_mod))
-			recipeIDs = d.search_recipe(creates, inputval, duration, bench, from_mod)
+			recipeIDs = d.search_recipe(creates, inputval, duration, bench, from_mod, display_name_search=False)
 			all_recipe_data = d.return_recipes_data(recipeIDs)
 
 			# Print all results to a file.
@@ -157,16 +156,16 @@ Thank you to all of the Frackin Universe Discord for just being nice and giving 
 		# Credits <3
 		elif option == "3":
 			print(credits)
-
 except Exception as e:
 	print("Wow, an error, even in such a simple program. Too bad!\nBut really, you should send me the following:\n\n{}".format(traceback.format_exc()))
 	input()
+	exit()
 
 
 
 
-#d.remove_entries_of_mod("base")
-#d.remove_entries_of_mod("FrackinUniverse")
+#d.clear_database()
 #d.fill_db("E:\\Steam\\steamapps\\common\\Starbound\\test_unpack", "140db0a1158d7b2ddc0300513e8e5870")
 #d.fill_db("C:\\Users\\Adam\\Desktop\\starbound_mod\\starboundless_search\\FU\\729480149", "06b43f04852a13acb54819fb6b94b427")
+
 

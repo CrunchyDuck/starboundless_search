@@ -1,43 +1,38 @@
 Current project goal:
-  Produce a demo version for people to use.
+  Figure out how to handle upgradeable crafting tables. They're cruel.
   
   
   
 TODO list:
-  IMPORTANT: When I come to making the .exe, I need to change anything that interacts with the directory (Such as self.program_folder in database.py) to be reflective of that.
-  Shinigami Apples#7335 from the Frackin Universe server tested having multiple outputs for a recipe, and was able to confirm that it doesn't really work. I will change my code to detect these as errors.
+  Make individual diagrams for each type of file I'm parsing, to give a better idea on what databases related to what objects.
+  Allow the user to order the results of a search by something (E.G alphabetical, by mod...)
+  Things to consider indexing for objects: npcToy, colonyTags, in-world sprite
+  Upgradeable objects are *very* flaky for me work with, so it's almost a certainty that I'll have an error in how I'm handling them. For now I will just do what will make it work. E.G The first "level" of any of these always seems to be the same as the first defined object. Therefore, I will overwrite the first object with the first level.
+  Consumables: Figure out how effects work so I can index them. - Effects are stored in .statuseffect files.
+  Tell people that if they find any critical errors in the .log file, to send me the file, since these are normally things I left in to test.
   Rename ALL instances of "input" - It currently overwrite the namespace of "input()" which gets user input lmao
   Figure out a way to warn users of just how god damn slow unpacking files is going to be.
-  Investigate why values are being doubled. - It seems upgradable workstations are being entered twice, some how.
-  Investigate why "Armourworks" was renamed armory - This seems to be an error with upgradable stations
-  Allow the user to omit a world, maybe by typing -(words to omit) or -word
+  Allow the user to search for NOT a word, maybe by typing -(words to omit) or -word
   Test adding poorly formatted/erroneous JSON files (Missing fields, completely broken stuff, etc.)
-  Change the "where_value" to allow for command inputs (E.G telling it that this should be the start of a set of brackets)
-  Switch file parsing to use self.filename
   Look into scanning .patch files for relevant information (Not sure how big this will be to do.
   Allow the user to search for recipes based on what object it's learned from.
   Add in more details to the metadata about unpack time/parsing time
   Update my staged DB and my modlist DB to include information about unpack/index/steamID
-  Finish making object search
+  Finish making "object" search mode
+  Implement more benchmarking things - Telling the user exactly how long everything took, where all that time went, etc.
   Add optional case sensitivity to searches.
-  Consider removing error check for the key "filter" when parsing json
-  When the user searches something that returns multiple results, instead of displaying all of them, I want to put them in a "staging" area, where they have to choose one of a list of recipes to view. I should allow them to go in/out of this stanging area between different recipes.
-  Implement subqueries for main search method
-  Update relationship table to include examples of how the fields store data.
-  Finish creating the "user input to search" for recipes.
   Ensure that any time I search for RegEx values, I catch errors for poorly created values.
-  Consider changing all "names" I'm storing things under as their display_names. This will allow for better searching with regex. - This will require me to restructure all of my search functions to allow for this.
-  Update the search function to allow for multiple where clauses.
-  Line 629 (Removing comments from .json files): I've seen // be used in actual values (e.g "name": "//duck". I should change this to regex so I can account for this in the future.
+  Update the search function to allow for multiple "where" clauses for one field.
   Figure out why "pleacekeeper1" isn't being indexed.
   Consider combining the function of search_recipe, get_recipe_information, and extract_recipe_string
   The metadata file is optional, so I need to account for that not being there.
+  Test if an input can store a dictionary instead of an array of dictionaries. For now I will assume it cannot.
 
-  Remove logging.debug from recipe parsing for "duration". I know the default value and many don't have this field.
   Change recipe database to expose input/output values into their own databases. This is to allow me to search for things like "less than 10 tungsten"
   
   For now I'm only going to allow for the user to specify a single input/output/etc for recipes, but I think it could certainly be possible to allow for multiple quantities and the like at a later date.
   Add colour formatting to the search function.
+  Maybe look into the rotting script for consumables for more data.
   
   
   Maybe I could add in "developer search" mode, that reverses the search to allow for searching IDs instead of display_names
