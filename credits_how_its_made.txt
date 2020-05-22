@@ -1,0 +1,28 @@
+This is a longer list of credits that will detail EVERYTHING that I (remembered I) used.
+My hope is that this will help people build their own programs in the future without all the needless research I did.
+
+
+Programming language: Python 3.8
+
+=== Packages used in Python ===
+
+= User interface =
+Tkinter: User interface
+PIL (ImageTk, Image): Used to make Tkinter easier to work with. Tkinter is old and has bad traditions.
+
+= Database =
+Sqlite3: Database management
+RegEx (re): Used to more effectively search patterns. Regex is fucking amazing, learn it if you work with pattern recognition ever.
+
+= File tools =
+pathlib: Searching folders on the PC, getting information about files/directories, etc.
+subprocess: Used to run the asset_unpacker.exe required to unpack files.
+os: A lot of basic functions relating to working with an operating system.
+shutil: Deleting trees. It has other applications that I didn't end up using, which is why I'm using it.
+hashlib: Creates a signature of a file, so I can see if any data has changed in it.
+json: Makes reading JSON files very easy.
+
+= Debugging and performance =
+datetime: Takes the current date and time, among other things. I use it for performance benchmarking.
+traceback: Allows you to print what your program was using at any point in time. Useful for debugging.
+logging: Used to log information about the program running. Vital for debugging.

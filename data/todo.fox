@@ -4,8 +4,16 @@ Current project goal:
   
   
 TODO list:
+  Look into learning more about my IDE because I suck at using it lmao
+  Create a standardized "Basic data" search for data to fill the learn and things tables.
+  Investigate armoryoutpost.object in FU. It is an example of an upgradeable object with item name different to animation state name.
   Make individual diagrams for each type of file I'm parsing, to give a better idea on what databases related to what objects.
+  Change all uses of the "filter" variable in my code, because it shadows a built-in variable.
+  Remove "self.from_mod" from lists that I insert into databases - I believe I can use tuples to specify this without loading it into every temporary array.
+  Maybe instead of filling up the log with every oddity in JSON files, I could store logs about missing fields etc in another file.
+  Change "extract_recipe_string" to use labeled indices rather than sequential so I can freely jumble them.
   Allow the user to order the results of a search by something (E.G alphabetical, by mod...)
+  Add racial description parsing for upgradeable stations
   Things to consider indexing for objects: npcToy, colonyTags, in-world sprite
   Upgradeable objects are *very* flaky for me work with, so it's almost a certainty that I'll have an error in how I'm handling them. For now I will just do what will make it work. E.G The first "level" of any of these always seems to be the same as the first defined object. Therefore, I will overwrite the first object with the first level.
   Consumables: Figure out how effects work so I can index them. - Effects are stored in .statuseffect files.
