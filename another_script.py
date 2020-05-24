@@ -109,7 +109,7 @@ def recipeloop():
 	# Perform a search
 	searching_for = "Searching for \"{}\"".format(search_field)
 	print("Searching...")
-	recipeIDs = d.search_recipe(creates, inputval, duration, bench, from_mod, display_name_search=False)
+	recipeIDs = d.search_recipe(creates, inputval, duration, bench, from_mod, display_name_search=True)
 	all_recipe_data = d.return_recipes_data(recipeIDs)
 
 	# Print all results to a file.

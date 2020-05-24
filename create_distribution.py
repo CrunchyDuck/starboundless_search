@@ -1,4 +1,7 @@
 # Creates the folder that'll be distributed to users.
+
+### REQUIRES PYINSTALLER ###
+
 from subprocess import run
 import os
 import shutil
